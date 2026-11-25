@@ -1,6 +1,6 @@
 #[cfg(not(windows))]
 fn main() {
-    eprintln!("DexNom Runtime shader preloading requires Windows.");
+    eprintln!("ЮПИ Лаунчер shader preloading requires Windows.");
 }
 
 #[cfg(windows)]
