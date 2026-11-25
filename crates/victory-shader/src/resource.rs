@@ -660,7 +660,9 @@ impl<'a> Tracer<'a> {
         };
         if let Some(reg) = self.inputs[v.0 as usize] {
             return match self.param_of(reg) {
-                Some((_, 0)) => Sum {
+                // (Not dword 0 of root constants: they are values, as
+                // their dwords 1 and up are; upstream VIctory #2154.)
+                Some((p, 0)) if self.layout[p].root != RootType::Constants => Sum {
                     base: Some(v),
                     offset: 0,
                     dynamic: None,
