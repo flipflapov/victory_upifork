@@ -12,7 +12,7 @@
 //! Mixed audio leaves through the host's WASAPI, which titles and
 //! middleware reach through COM like on PC. fmod's console build sets up
 //! the coprocessor inside `System_Create` and waits there for its first
-//! command to be acknowledged; Grand Theft Auto VI uses only XMA contexts.
+//! command to be acknowledged; the title uses only XMA contexts.
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
@@ -114,6 +114,11 @@ fn heap_alloc(size: usize, align: usize) -> Option<(*mut u8, u32)> {
     heap.blocks
         .insert(ptr as usize, Block { size, apu, layout });
     heap.by_apu.insert(apu, ptr as usize);
+    // The big ones are named in the log: they are the title's audio memory
+    // given out of our allocator, which the memory line counts as ours.
+    if size >= 32 << 20 {
+        tracing::info!(mb = size >> 20, at = ?ptr, "audio memory for the title from our allocator");
+    }
     Some((ptr, apu))
 }
 
@@ -471,7 +476,8 @@ impl Xma {
         // The decoder writes the same words.
         let mut slot = lock(&self.voices[index as usize]);
         let size = context.field(0, 22, 5).max(1);
-        let read = (context.field(9, 0, 5) + blocks) % size;
+        // The count is the title's: reduced first, so the sum stays small.
+        let read = (context.field(9, 0, 5) + blocks % size) % size;
         context.set_field(9, 0, 5, read);
         if blocks > 0 {
             context.set_field(1, 31, 1, 1);
@@ -1061,6 +1067,13 @@ mod tests {
         assert_eq!(produced(&xma()), Some(26 * SAMPLES_PER_BLOCK));
         assert_eq!(context.field(0, 20, 2), 0, "input used up");
         assert_eq!(context.field(2, 26, 5), INPUT_INVALID);
+
+        // A count near `u32::MAX` wraps the read block like any other
+        // (3 + 0xffff_ffff blocks on a ring of four is block 2); the sum
+        // used to overflow.
+        context.set_field(9, 0, 5, 3);
+        submit(ADVANCE_XMA_READ, &[1, u32::MAX]);
+        assert_eq!(context.field(9, 0, 5), 2);
 
         submit(DISABLE_XMA, &[1]);
         assert_eq!(produced(&xma()), None);
