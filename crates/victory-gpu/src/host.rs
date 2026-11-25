@@ -119,25 +119,33 @@ pub(crate) fn available_physical_ram() -> Option<u64> {
 }
 
 /// Effective idle timeout (in milliseconds) for VRAM-backed host textures,
-/// scaled down under VRAM pressure. Never returns less than 1,000 ms so
-/// handles not yet recorded into a list or slot remain protected.
+/// by the room the card's budget has left: 15 s with 1.5 GiB or more, 5 s
+/// with 1 GiB, 2.5 s with 512 MiB, else 1 s (over budget too). Never less
+/// than 1,000 ms so handles not yet recorded into a list or slot remain
+/// protected. By share of the budget (1 s from 85 % used) a 12 GB card
+/// with 1.6 GB left let go copies idle for a second: 19 GB of them let go
+/// and 9.8 GB made again in 17 minutes, each detiled and uploaded anew.
 pub(crate) fn vram_idle_ms(video_memory: Option<[u64; 4]>) -> u64 {
+    const ROOMY_MS: u64 = 15_000;
     const NORMAL_MS: u64 = 5_000;
     const MODERATE_MS: u64 = 2_500;
     const HIGH_MS: u64 = 1_000;
+    const MIB: u64 = 1 << 20;
     let Some([budget, used, ..]) = video_memory else {
         return NORMAL_MS;
     };
     if budget == 0 {
         return NORMAL_MS;
     }
-    let used_pct = (u128::from(used) * 100) / u128::from(budget);
-    if used_pct >= 85 {
-        HIGH_MS
-    } else if used_pct >= 75 {
+    let room = budget.saturating_sub(used);
+    if room >= 1536 * MIB {
+        ROOMY_MS
+    } else if room >= 1024 * MIB {
+        NORMAL_MS
+    } else if room >= 512 * MIB {
         MODERATE_MS
     } else {
-        NORMAL_MS
+        HIGH_MS
     }
 }
 
@@ -7680,14 +7688,18 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
     fn vram_idle_ms_scales_with_pressure() {
         use super::vram_idle_ms;
         let gib = 1024 * 1024 * 1024;
-        // Normal (< 75%)
-        assert_eq!(vram_idle_ms(Some([10 * gib, 0, 0, 0])), 5_000);
-        assert_eq!(vram_idle_ms(Some([10 * gib, 7 * gib, 0, 0])), 5_000);
-        assert_eq!(vram_idle_ms(Some([100, 74, 0, 0])), 5_000);
-        // Moderate (75%..85%)
-        assert_eq!(vram_idle_ms(Some([100, 75, 0, 0])), 2_500);
-        assert_eq!(vram_idle_ms(Some([100, 84, 0, 0])), 2_500);
-        // High (>= 85%, including over-budget)
+        let mib = 1024 * 1024;
+        // Roomy (1.5 GiB or more left), however full by share
+        assert_eq!(vram_idle_ms(Some([10 * gib, 0, 0, 0])), 15_000);
+        assert_eq!(vram_idle_ms(Some([11204 * mib, 9602 * mib, 0, 0])), 15_000);
+        // Normal (1 GiB to 1.5 GiB left)
+        assert_eq!(vram_idle_ms(Some([10 * gib, 9 * gib, 0, 0])), 5_000);
+        // Moderate (512 MiB to 1 GiB left)
+        assert_eq!(
+            vram_idle_ms(Some([10 * gib, 10 * gib - 600 * mib, 0, 0])),
+            2_500
+        );
+        // High (under 512 MiB left, including over-budget)
         assert_eq!(vram_idle_ms(Some([100, 85, 0, 0])), 1_000);
         assert_eq!(vram_idle_ms(Some([10 * gib, 12 * gib, 0, 0])), 1_000);
         // Missing or zero budget falls back to normal
