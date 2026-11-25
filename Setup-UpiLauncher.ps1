@@ -188,12 +188,19 @@ foreach ($stale in 'DexNom Runtime.lnk', 'DexNom Runtime (Experimental RT).lnk')
 $shell = New-Object -ComObject WScript.Shell
 foreach ($folder in $ShortcutDirectory, $desktop) {
     [IO.Directory]::CreateDirectory($folder) | Out-Null
-    $shortcut = $shell.CreateShortcut((Join-Path $folder "$AppName.lnk"))
-    $shortcut.TargetPath = $launcher
-    $shortcut.Arguments = ''
-    $shortcut.WorkingDirectory = $InstallDir
-    $shortcut.Description = $AppName
-    if ($icon) { $shortcut.IconLocation = "$icon,0" }
-    $shortcut.Save()
+    # The second one runs the title as a Series S: its own lower settings
+    # and less memory (victory-play.exe --series-s).
+    foreach ($entry in @(
+        @{ Name = $AppName; Arguments = '' }
+        @{ Name = "$AppName (Series S)"; Arguments = '--series-s' }
+    )) {
+        $shortcut = $shell.CreateShortcut((Join-Path $folder ($entry.Name + '.lnk')))
+        $shortcut.TargetPath = $launcher
+        $shortcut.Arguments = $entry.Arguments
+        $shortcut.WorkingDirectory = $InstallDir
+        $shortcut.Description = $entry.Name
+        if ($icon) { $shortcut.IconLocation = "$icon,0" }
+        $shortcut.Save()
+    }
 }
-Write-Host "Open $AppName from the desktop or the Start menu to play."
+Write-Host "Open $AppName from the desktop or the Start menu to play; $AppName (Series S) runs it with lower settings."

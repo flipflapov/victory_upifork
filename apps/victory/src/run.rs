@@ -191,6 +191,38 @@ fn title_dll(host: &victory_hle::HostPolicy, dll: &str) -> bool {
     !host.allows(dll) && !victory_hle::registry().iter().any(|m| m.serves(dll))
 }
 
+/// Whether `file` is a title DLL the title is told is not there when it
+/// loads it itself (`LoadLibrary` fails as for a missing file):
+/// `VICTORY_REFUSE_TITLE_DLLS=<name>,...` (any case). The title's FidelityFX
+/// upscaler, which it loads on Series S only: with it the Series S picture
+/// stayed black on an RTX 3060 while the title ran on.
+#[cfg(windows)]
+fn refused_title_dll(file: &str) -> bool {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    static LOGGED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let names = NAMES.get_or_init(|| {
+        std::env::var("VICTORY_REFUSE_TITLE_DLLS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|name| name.trim().to_ascii_lowercase())
+            .filter(|name| !name.is_empty())
+            .collect()
+    });
+    let file = file.to_ascii_lowercase();
+    if !names.contains(&file) {
+        return false;
+    }
+    let mut logged = LOGGED.lock().unwrap_or_else(|e| e.into_inner());
+    if !logged.contains(&file) {
+        tracing::warn!(
+            dll = file,
+            "a title DLL the title loads is refused (VICTORY_REFUSE_TITLE_DLLS)"
+        );
+        logged.push(file);
+    }
+    true
+}
+
 /// Title DLLs the title loads itself (`LoadLibrary`) that nothing imports,
 /// e.g. The title's upscaler behind its FidelityFX loader.
 #[cfg(windows)]
@@ -216,6 +248,9 @@ impl LateDlls {
         show: impl Fn(&str, victory_loader::BindReport),
     ) -> Result<Option<usize>> {
         use victory_hle::runtime::{forget_image, image_named, set_image_path};
+        if refused_title_dll(file) {
+            return Ok(None);
+        }
         // Waits while another thread initialises a DLL; a `DllMain` that
         // loads another DLL re-enters.
         self.lock.hold(|| {

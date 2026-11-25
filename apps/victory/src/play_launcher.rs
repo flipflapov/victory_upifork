@@ -13,12 +13,14 @@ pub(super) fn run(warm: bool) -> anyhow::Result<()> {
     let folder = launcher.parent().context("Launcher folder is missing")?;
     let runtime = folder.join("victory.exe");
     let mut args = std::env::args_os().skip(1).peekable();
-    let (mut warp, mut rt) = (false, false);
+    let (mut warp, mut rt, mut series_s) = (false, false, false);
     while let Some(option) = args.peek() {
         if option == "--warp" {
             warp = true;
         } else if option == "--rt" {
             rt = true;
+        } else if option == "--series-s" {
+            series_s = true;
         } else {
             break;
         }
@@ -34,7 +36,10 @@ pub(super) fn run(warm: bool) -> anyhow::Result<()> {
         }
     };
     if args.next().is_some() {
-        bail!("Usage\n{} [--rt] [--warp] [game executable]", launcher.display());
+        bail!(
+            "Usage\n{} [--rt] [--warp] [--series-s] [game executable]",
+            launcher.display()
+        );
     }
     if !game.is_file() || !runtime.is_file() {
         bail!(
@@ -109,6 +114,24 @@ pub(super) fn run(warm: bool) -> anyhow::Result<()> {
         }
         writeln!(log, "{name}={}", set.as_deref().unwrap_or(value))?;
     }
+    // Series S (`--series-s`): the title's own lower settings and about
+    // 7.6 GB of title memory instead of 13.5. Its picture stayed black on an
+    // RTX 3060 with the FidelityFX upscaler it loads on Series S only, so
+    // the upscaler is refused unless the environment names other DLLs.
+    let console = if series_s { "series-s" } else { "series-x" };
+    writeln!(log, "console {console}")?;
+    if series_s {
+        const REFUSE: &str = "VICTORY_REFUSE_TITLE_DLLS";
+        let set = std::env::var(REFUSE).ok();
+        if set.is_none() {
+            child.env(REFUSE, "amd_fidelityfx_upscaler_xbox.dll");
+        }
+        writeln!(
+            log,
+            "{REFUSE}={}",
+            set.as_deref().unwrap_or("amd_fidelityfx_upscaler_xbox.dll")
+        )?;
+    }
     child
         .current_dir(folder)
         .env("VICTORY_DATA_DIR", &state)
@@ -125,7 +148,7 @@ pub(super) fn run(warm: bool) -> anyhow::Result<()> {
             .args([
                 "--execute",
                 "--console",
-                "series-x",
+                console,
                 "--unimplemented",
                 "trap",
             ])
