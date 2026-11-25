@@ -94,6 +94,21 @@ pub(super) fn run(warm: bool) -> anyhow::Result<()> {
     if std::env::var_os("VICTORY_DEBUG_HUD").is_none() {
         child.env("VICTORY_DEBUG_HUD", "1");
     }
+    // Defaults for a 12 GB NVIDIA card (an RTX 3060 here): card buffers
+    // within 1 GB and a 1080p display reported to the title took world
+    // frames from 306 to 200 ms (medians of a quarter of an hour each).
+    // A value set in the environment wins.
+    for (name, value) in [
+        ("VICTORY_CARD_BUFFERS_MIN_MB", "1"),
+        ("VICTORY_CARD_BUFFERS_MB", "1024"),
+        ("VICTORY_DISPLAY_MODE", "1920x1080"),
+    ] {
+        let set = std::env::var(name).ok();
+        if set.is_none() {
+            child.env(name, value);
+        }
+        writeln!(log, "{name}={}", set.as_deref().unwrap_or(value))?;
+    }
     child
         .current_dir(folder)
         .env("VICTORY_DATA_DIR", &state)

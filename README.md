@@ -1,3 +1,23 @@
+# victory_upifork
+
+Форк [DexNom Runtime](https://github.com/DexNom/VIctory) (VIctory) для NVIDIA
+RTX 3060 12 ГБ на Windows 11. Файлов игры здесь нет: нужна своя копия.
+
+- **Установка и обновление:** `git pull`, затем `.\Setup.cmd` (в первый раз он
+  спросит, где лежит `game_scarlett_master.exe`). Запуск: ярлык
+  **DexNom Runtime** в меню «Пуск».
+- **Настройки лаунчера по умолчанию** (переменная, заданная вручную, важнее):
+  `VICTORY_CARD_BUFFERS_MIN_MB=1`, `VICTORY_CARD_BUFFERS_MB=1024`,
+  `VICTORY_DISPLAY_MODE=1920x1080`. С ними кадр в мире стал 200 мс вместо 306
+  (медианы, RTX 3060, профиль Series X). Профиль Series S даёт чёрный экран.
+- **Логи:** `%LOCALAPPDATA%\DexNom Runtime\logs`, в `latest.txt` путь к последнему.
+- **Прежняя основа** (форк под AMD с правкой таблицы дескрипторов для NVIDIA):
+  коммит `1e4815a`.
+
+Ниже README DexNom без изменений.
+
+---
+
 # DexNom Runtime
 
 DexNom Runtime is a community fork of Marvisak's VIctory for Windows x64. It runs an Xbox Series executable from your own game installation and translates its GPU work for Direct3D 12. It builds on the Radeon runtime tested at `e061c69032b84ec6e2ec17340469cd689500dafd` and adds fixes for static sampler selection, wave64 lane masks and integer render targets. Game files, executables, saves and generated shader caches stay on your own computer.
