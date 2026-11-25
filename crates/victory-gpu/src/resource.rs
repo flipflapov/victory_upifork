@@ -1128,6 +1128,8 @@ pub(crate) struct HostTexture {
     /// Whether its contents come from title memory ([`fills`]): counted in
     /// [`KINDS`] while it lives.
     filled: bool,
+    /// The title's largest mips it goes without ([`mips_to_skip`]).
+    pub(crate) skip: u32,
 }
 
 /// What a title texture has on the host: its host copy and, for a depth
@@ -1267,6 +1269,91 @@ fn fills(desc: &ResourceDesc) -> bool {
     desc.dimension != BUFFER && desc.flags & TARGET_DEPTH_UNORDERED == 0
 }
 
+/// The largest side a host copy of a texture the title fills keeps:
+/// `VICTORY_TEXTURE_MAX=<texels>` (64 or more; unset: every mip). Larger
+/// ones go without their largest mips ([`mips_to_skip`]). On a 12 GB card
+/// the textures filled the card's memory: 1,706 passes made no host copy
+/// for want of room in 20 minutes, and 9 GB of copies let go were made
+/// again.
+#[cfg(windows)]
+fn texture_max() -> Option<u64> {
+    static MAX: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        let max = std::env::var("VICTORY_TEXTURE_MAX").ok()?.trim().parse::<u64>().ok();
+        let max = max.filter(|&m| m >= 64)?;
+        tracing::info!(
+            max,
+            "host copies of textures the title fills go without their mips larger than this (VICTORY_TEXTURE_MAX)"
+        );
+        Some(max)
+    })
+}
+
+/// How many of the largest mips of title texture `desc` its host copy goes
+/// without: a 2D block-compressed texture the title fills, of one layer
+/// and one sample and more than one mip, with a side over [`texture_max`],
+/// until its largest side fits, keeping at least one mip and a largest
+/// mip of whole blocks (the host's rule for block-compressed textures).
+/// The title's memory, layout and views stay its own: the host copy's mip
+/// `m` is the title's `m + skip` ([`host_subresource`]).
+#[cfg(windows)]
+fn mips_to_skip(desc: &ResourceDesc) -> u32 {
+    const TEXTURE2D: u32 = 3;
+    let Some(max) = texture_max() else {
+        return 0;
+    };
+    let format = pc_format(desc.format);
+    let block = (70..=84).contains(&format) || (94..=99).contains(&format);
+    if !block
+        || !fills(desc)
+        || desc.dimension != TEXTURE2D
+        || desc.depth_or_array_size != 1
+        || desc.sample_count > 1
+        || desc.mip_levels < 2
+    {
+        return 0;
+    }
+    let (width, height) = (desc.width, u64::from(desc.height));
+    let mut skip = 0;
+    while (width.max(height) >> skip) > max
+        && skip + 1 < u32::from(desc.mip_levels)
+        && (width >> (skip + 1)).is_multiple_of(4)
+        && (height >> (skip + 1)).is_multiple_of(4)
+    {
+        skip += 1;
+    }
+    skip
+}
+
+/// How many of title texture `this`'s largest mips its host copy goes
+/// without ([`mips_to_skip`]); 0 for buffers and textures without a host
+/// copy. Not a use of the texture.
+#[cfg(windows)]
+pub(crate) fn skipped_mips(this: This) -> u32 {
+    if this.is_null() {
+        return 0;
+    }
+    let r = resource(this);
+    if r.desc.dimension == BUFFER {
+        return 0;
+    }
+    let made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
+    made.as_ref().map_or(0, |(host, _)| host.skip)
+}
+
+/// The host copy's subresource for title subresource `sub` of texture
+/// `this`; `None` for a mip the host copy goes without ([`skipped_mips`]).
+#[cfg(windows)]
+pub(crate) fn host_subresource(this: This, sub: u32) -> Option<u32> {
+    let skip = skipped_mips(this);
+    if skip == 0 {
+        return Some(sub);
+    }
+    let mips = u32::from(resource(this).desc.mip_levels);
+    let (mip, rest) = (sub % mips, sub / mips);
+    (mip >= skip).then(|| rest * (mips - skip) + mip - skip)
+}
+
 /// Whether the title fills texture `this` itself ([`fills`]).
 #[cfg(windows)]
 pub(crate) fn title_fills(this: This) -> bool {
@@ -1306,10 +1393,35 @@ fn hosted(this: This, make: bool) -> Option<Made> {
             .clear
             .as_ref()
             .map_or(std::ptr::null(), |c| std::ptr::from_ref(c).cast::<c_void>());
-        let Some(texture) = host_texture(&r.desc, r.host.state, clear) else {
+        // Without its largest mips if it is large ([`mips_to_skip`]); whole
+        // if the host refuses that.
+        let skip = mips_to_skip(&r.desc);
+        let made_texture = host_texture(&r.desc, r.host.state, clear, skip)
+            .map(|t| (t, skip))
+            .or_else(|| {
+                (skip > 0)
+                    .then(|| host_texture(&r.desc, r.host.state, clear, 0))
+                    .flatten()
+                    .map(|t| (t, 0))
+            });
+        let Some((texture, skip)) = made_texture else {
             r.host.refused.store(true, Relaxed);
             return None;
         };
+        if skip > 0 {
+            static SMALLER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = SMALLER.fetch_add(1, Relaxed) + 1;
+            if n.is_power_of_two() {
+                tracing::info!(
+                    textures = n,
+                    last = format_args!(
+                        "{}x{} f{} without {skip} mips",
+                        r.desc.width, r.desc.height, r.desc.format
+                    ),
+                    "host copies made without their largest mips so far (VICTORY_TEXTURE_MAX)"
+                );
+            }
+        }
         let twin = twin_texture(&r.desc, &texture);
         // One line per depth texture with unordered access: its address is
         // the one target dumps and the captured frame's list of commands
@@ -1325,6 +1437,7 @@ fn hosted(this: This, make: bool) -> Option<Made> {
         let state = crate::host::legal_state(&texture, crate::host::texture_state(r.host.state));
         let mut host = HostTexture::new(texture, state);
         host.filled = fills(&r.desc);
+        host.skip = skip;
         if host.filled {
             KINDS[0].fetch_add(1, Relaxed);
             KINDS[1].fetch_add(host.bytes, Relaxed);
@@ -1793,6 +1906,7 @@ impl HostTexture {
             state: std::sync::atomic::AtomicU32::new(state),
             bytes,
             filled: false,
+            skip: 0,
         }
     }
 }
@@ -1858,12 +1972,14 @@ pub(crate) fn host_copy(this: This) -> Option<std::sync::Arc<HostTexture>> {
 }
 
 /// A host texture like the title's: same description, in GPU memory,
-/// without the console's layout and flags.
+/// without the console's layout and flags, and without its `skip` largest
+/// mips ([`mips_to_skip`]).
 #[cfg(windows)]
 fn host_texture(
     desc: &ResourceDesc,
     state: u32,
     clear: *const c_void,
+    skip: u32,
 ) -> Option<windows::Win32::Graphics::Direct3D12::ID3D12Resource> {
     use windows::Win32::Graphics::Direct3D12::*;
     const PC_FLAGS: u32 = 0xf; // render target, depth, UAV, no shader access
@@ -1875,6 +1991,11 @@ fn host_texture(
     d.layout = 0;
     d.alignment = 0;
     d.flags &= PC_FLAGS;
+    if skip > 0 && skip < u32::from(d.mip_levels) {
+        d.width = (d.width >> skip).max(1);
+        d.height = (d.height >> skip).max(1);
+        d.mip_levels -= skip as u16;
+    }
     // PC refuses depth targets that are also unordered-access (the console
     // allows both; the title's shadow maps ask for it).
     // The host copy loses the unordered access: shaders write a colour

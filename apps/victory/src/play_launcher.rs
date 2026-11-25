@@ -102,11 +102,14 @@ pub(super) fn run(warm: bool) -> anyhow::Result<()> {
     // Defaults for a 12 GB NVIDIA card (an RTX 3060 here): card buffers
     // within 1 GB and a 1080p display reported to the title took world
     // frames from 306 to 200 ms (medians of a quarter of an hour each).
-    // A value set in the environment wins.
+    // Textures the title fills keep sides of at most 1024 texels on the
+    // card: they filled its 12 GB, and copies were let go and made again.
+    // A value set in the environment wins (VICTORY_TEXTURE_MAX=0: whole).
     for (name, value) in [
         ("VICTORY_CARD_BUFFERS_MIN_MB", "1"),
         ("VICTORY_CARD_BUFFERS_MB", "1024"),
         ("VICTORY_DISPLAY_MODE", "1920x1080"),
+        ("VICTORY_TEXTURE_MAX", "1024"),
     ] {
         let set = std::env::var(name).ok();
         if set.is_none() {

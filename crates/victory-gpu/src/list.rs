@@ -858,6 +858,11 @@ extern "system" fn copy_resource(this: This, dst: This, src: This) {
             if unlike(dst, src) {
                 return;
             }
+            // Host copies of different mips (one without its largest ones,
+            // `crate::resource::skipped_mips`) do not copy whole.
+            if crate::resource::skipped_mips(dst) != crate::resource::skipped_mips(src) {
+                return;
+            }
             // A source the title fills itself is uploaded first (upstream
             // PR #671): a copy read whatever the host texture held.
             if crate::texture::title_written(from) {
@@ -896,6 +901,21 @@ pub(crate) struct CopyLocation {
     resource: This,
     kind: u32,
     footprint: crate::resource::PlacedFootprint,
+}
+
+/// `location` with its subresource as the host copy numbers it: a texture
+/// whose host copy goes without the title's largest mips
+/// (`crate::resource::host_subresource`); `None` for one of those mips.
+/// Asked after the host copy is made.
+#[cfg(windows)]
+fn host_location(mut location: CopyLocation) -> Option<CopyLocation> {
+    const SUBRESOURCE_INDEX: u32 = 0;
+    if location.kind == SUBRESOURCE_INDEX {
+        let sub = location.footprint.offset as u32;
+        location.footprint.offset =
+            u64::from(crate::resource::host_subresource(location.resource, sub)?);
+    }
+    Some(location)
 }
 
 /// Texture to texture on the GPU; buffer to texture through an upload
@@ -960,6 +980,12 @@ extern "system" fn copy_texture_region(
         if unlike(dst.resource, src.resource) {
             return;
         }
+        // Subresources as the host copies number them (one without the
+        // title's largest mips, `crate::resource::skipped_mips`): a copy
+        // into or out of one of those mips has nothing to copy on the host.
+        let Some(dst_host) = host_location(dst) else {
+            return;
+        };
         let mut from = src;
         let _upload; // keeps the source alive while this call records it
         #[cfg(feature = "diagnostics")]
@@ -989,6 +1015,10 @@ extern "system" fn copy_texture_region(
             let Some(texture) = crate::resource::host_resource(src.resource) else {
                 return;
             };
+            let Some(src_host) = host_location(src) else {
+                return;
+            };
+            from = src_host;
             list.twin_use(src.resource, false, false);
             if crate::texture::title_written(texture) {
                 crate::texture::upload(list, src.resource, texture);
@@ -1001,7 +1031,7 @@ extern "system" fn copy_texture_region(
         list.twin_use(dst.resource, false, true);
         ensure_state(list, dst.resource, COPY_DEST);
         crate::texture::host_written(dst.resource);
-        let mut to_location = dst;
+        let mut to_location = dst_host;
         to_location.resource = to.as_raw().cast_const().cast();
         let host_box = (!source_box.is_null()).then(|| source_box.cast::<D3D12_BOX>());
         #[cfg(feature = "diagnostics")]
@@ -1078,6 +1108,8 @@ fn read_back(
     let data = buffer_range(dst.resource, dst.footprint.offset, bytes).ok_or("a destination outside its buffer")?;
     let texture = crate::resource::host_resource(src.resource).ok_or("no host texture")?;
     let buffer = host.read_back_buffer(size).ok_or("no read-back buffer")?;
+    // The source's subresource as its host copy numbers it.
+    let mut from = host_location(src).ok_or("a mip the host copy goes without")?;
     // As a texture source of any copy: what shaders wrote to a depth twin
     // and what the title wrote itself first, then the state.
     list.twin_use(src.resource, false, false);
@@ -1085,7 +1117,6 @@ fn read_back(
         crate::texture::upload(list, src.resource, texture);
     }
     ensure_state(list, src.resource, COPY_SOURCE);
-    let mut from = src;
     from.resource = texture.as_raw().cast_const().cast();
     let mut to = dst;
     to.resource = buffer.as_raw().cast_const().cast();

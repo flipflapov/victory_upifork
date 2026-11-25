@@ -41,11 +41,15 @@ pub(crate) struct Staging {
     footprints: Vec<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>,
     rows: Vec<u32>,
     layout: victory_formats::texture::Layout,
-    /// Mips per array slice.
+    /// Mips per array slice (of the host texture).
     mips: u32,
     /// The first of them that is uploaded, and the bytes of title memory
     /// read for it and the smaller ones.
     first: u32,
+    /// The title's largest mips the host texture goes without
+    /// (`crate::resource::skipped_mips`): its mip `m` is the title's
+    /// `m + skip`.
+    skip: u32,
     size: usize,
     /// The staging buffer's bytes (counted in `STAGED` while it lives).
     bytes: u64,
@@ -128,6 +132,11 @@ pub(crate) fn alias(list: &HostList, placed: This, source: This) -> bool {
     ) else {
         return false;
     };
+    // Level by level, the two must have the same mips: one without its
+    // largest ones is filled from title memory instead.
+    if crate::resource::skipped_mips(placed) + crate::resource::skipped_mips(source) > 0 {
+        return false;
+    }
     let Some(host) = host() else { return false };
     let through = {
         let mut map = THROUGH.lock().unwrap_or_else(|e| e.into_inner());
@@ -925,10 +934,14 @@ impl Staging {
             let linear = unsafe {
                 std::slice::from_raw_parts_mut(self.data.add(footprint.Offset as usize), len)
             };
-            if let Err(e) =
-                self.layout
-                    .detile(tiled, mip, slice, linear, pitch, pitch * rows as usize)
-            {
+            if let Err(e) = self.layout.detile(
+                tiled,
+                mip + self.skip,
+                slice,
+                linear,
+                pitch,
+                pitch * rows as usize,
+            ) {
                 tracing::warn!(?e, mip, slice, "texture not detiled");
                 return;
             }
@@ -1033,13 +1046,13 @@ pub(crate) fn staged(resource: This) -> Option<(u64, bool)> {
     Some((s.size as u64, committed(s.memory, s.size)))
 }
 
-/// The first mip a title texture's staging buffer holds; `u32::MAX` without
-/// one.
+/// The first mip a title texture's staging buffer holds, as the title
+/// numbers its mips; `u32::MAX` without one.
 fn staged_from(resource: This) -> u32 {
     let map = STAGING.lock().unwrap_or_else(|e| e.into_inner());
     map.as_ref()
         .and_then(|map| map.get(&(resource as usize)))
-        .map_or(u32::MAX, |s| s.first)
+        .map_or(u32::MAX, |s| s.first + s.skip)
 }
 
 /// Whether `[at, at + len)` is committed memory (streamed textures may be
@@ -1232,7 +1245,7 @@ fn staging(resource: This, texture: &ID3D12Resource, first: u32) -> Option<Arc<S
     let mut map = STAGING.lock().unwrap_or_else(|e| e.into_inner());
     let map = map.get_or_insert_with(HashMap::new);
     if let Some(s) = map.get(&(resource as usize))
-        && s.first <= first
+        && s.first + s.skip <= first.max(s.skip)
     {
         return Some(s.clone());
     }
@@ -1254,7 +1267,16 @@ fn staging(resource: This, texture: &ID3D12Resource, first: u32) -> Option<Arc<S
     let host = host()?;
     // SAFETY: a live resource.
     let d = unsafe { texture.GetDesc() };
-    let (first, size) = staged_part(&layout, u32::from(d.MipLevels), first);
+    // A host texture without the title's largest mips: they are neither
+    // read nor detiled, and its mips are numbered from the first it has.
+    let skip = crate::resource::skipped_mips(resource);
+    let (mut first, mut size) =
+        staged_part(&layout, u32::from(d.MipLevels) + skip, first.max(skip));
+    if first < skip {
+        first = skip;
+        size = layout.bytes_from(skip) as usize;
+    }
+    let first = first - skip;
     let count = if d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D {
         u32::from(d.MipLevels)
     } else {
@@ -1296,6 +1318,7 @@ fn staging(resource: This, texture: &ID3D12Resource, first: u32) -> Option<Arc<S
         layout,
         mips: u32::from(d.MipLevels),
         first,
+        skip,
         size,
         bytes: total,
         memory,
