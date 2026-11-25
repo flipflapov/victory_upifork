@@ -395,6 +395,45 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
             first_points_at = format_args!("{first:x?}"),
             "a pipeline creation method that is not implemented: the title goes without this pipeline"
         );
+        // Diagnostic, the first two calls of each method: what each word
+        // that may be an address points at, if the word after it may be a
+        // size (as `Bytecode`'s two words are): its first bytes, and the
+        // programs in it if it is a shader container. The two methods'
+        // descriptions are to be written from this.
+        #[cfg(windows)]
+        if calls <= 2
+            && let Some(words) = &description
+        {
+            for at in 0..words.len().saturating_sub(1) {
+                let (address, size) = (words[at] as usize, words[at + 1] as usize);
+                if !(0x10000..0x8000_0000_0000).contains(&address) || !(1..=1 << 20).contains(&size)
+                {
+                    continue;
+                }
+                let mut bytes = vec![0u8; size];
+                if !crate::host::read_into(address as *const u8, &mut bytes) {
+                    continue;
+                }
+                let programs = victory_shader::Container::parse(&bytes).ok().map(|c| {
+                    c.part(victory_shader::FourCC::DXIL)
+                        .and_then(|part| victory_shader::native_programs(part.data).ok())
+                        .map_or_else(Vec::new, |p| {
+                            p.iter().map(|p| format!("{:?}", p.stage)).collect()
+                        })
+                });
+                let head: String = bytes.iter().take(64).map(|b| format!("{b:02x}")).collect();
+                tracing::warn!(
+                    slot = format_args!("{:#x}", SLOT),
+                    calls,
+                    word = at,
+                    address = format_args!("{address:#x}"),
+                    size,
+                    container_programs = format_args!("{programs:?}"),
+                    head,
+                    "a pipeline creation method that is not implemented: what its description points at"
+                );
+            }
+        }
     }
     E_NOTIMPL
 }
