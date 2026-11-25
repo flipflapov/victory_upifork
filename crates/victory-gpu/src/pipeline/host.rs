@@ -368,6 +368,26 @@ pub(crate) struct HostPipeline {
     pub(crate) state: String,
 }
 
+/// What a translated program's `PSV0` declares (`victory_shader::emit`
+/// writes it, runtime info version 2): the least and the most lanes a wave
+/// it runs in may have (equal for `WaveSize`; 0 and `u32::MAX` for any),
+/// and its group's threads. For refused pipelines: a host of 32-lane
+/// waves (NVIDIA) refuses a program that wants 64.
+fn declared_waves(dxil: &[u8]) -> Option<((u32, u32), [u32; 3])> {
+    let container = victory_shader::Container::parse(dxil).ok()?;
+    let psv = container.part(victory_shader::FourCC::PSV0)?.data;
+    let word = |at: usize| {
+        psv.get(at..at + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    // After the info's size: 16 bytes of stage info, then the wave lanes;
+    // the threads from byte 36 of the info.
+    Some((
+        (word(4 + 16)?, word(4 + 20)?),
+        [word(4 + 36)?, word(4 + 40)?, word(4 + 44)?],
+    ))
+}
+
 /// Logs a pipeline that gets no host pipeline, once per reason.
 fn refuse(reason: &'static str, shaders: &[Arc<Shader>]) -> Option<HostPipeline> {
     static SEEN: std::sync::Mutex<Vec<&str>> = std::sync::Mutex::new(Vec::new());
@@ -581,7 +601,19 @@ impl HostPipeline {
             let pso = match made {
                 Ok(pso) => pso,
                 Err(e) => {
-                    tracing::warn!(error = %e, ?shaders, "host pipeline refused");
+                    // What the translated program declares: the wave sizes
+                    // it runs in (a host of 32-lane waves refuses 64) and
+                    // its group.
+                    let declared = stages
+                        .first()
+                        .and_then(|(s, _)| s.translated())
+                        .and_then(|t| declared_waves(&t.host.dxil));
+                    tracing::warn!(
+                        error = %e,
+                        ?shaders,
+                        declared = format_args!("{declared:?}"),
+                        "host pipeline refused (declared: wave lanes min, max; group)"
+                    );
                     host.log_messages();
                     return None;
                 }

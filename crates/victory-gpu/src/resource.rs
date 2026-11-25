@@ -1313,6 +1313,13 @@ fn mips_to_skip(desc: &ResourceDesc) -> u32 {
     {
         return 0;
     }
+    // Half as large while the card is close to having no room for more
+    // copies ([`headroom`]): a smaller copy rather than none.
+    let max = if headroom_now().is_some_and(|room| room < 512 << 20) {
+        (max / 2).max(64)
+    } else {
+        max
+    };
     let (width, height) = (desc.width, u64::from(desc.height));
     let mut skip = 0;
     while (width.max(height) >> skip) > max
@@ -1508,7 +1515,7 @@ pub(crate) fn room() -> bool {
 /// 1 MiB up take 449 MB more of the card than before (941 against 492),
 /// and 94 gives the textures about that much back.
 #[cfg(windows)]
-fn room_percent() -> u64 {
+pub(crate) fn room_percent() -> u64 {
     static PERCENT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *PERCENT.get_or_init(|| {
         std::env::var("VICTORY_TEXTURE_ROOM_PERCENT")
@@ -1516,6 +1523,33 @@ fn room_percent() -> u64 {
             .and_then(|v| v.trim().parse::<u64>().ok())
             .map_or(90, |percent| percent.clamp(50, 97))
     })
+}
+
+/// The card's memory left before [`room`] makes no more host copies of
+/// textures: its budget's [`room_percent`] less what is in use, from
+/// `video_memory` (`None` without it).
+#[cfg(windows)]
+pub(crate) fn headroom(video_memory: Option<[u64; 4]>) -> Option<u64> {
+    let [budget, used, ..] = video_memory?;
+    (budget > 0).then(|| (budget / 100 * room_percent()).saturating_sub(used))
+}
+
+/// [`headroom`] now, asked of the system at most every 50 ms.
+#[cfg(windows)]
+fn headroom_now() -> Option<u64> {
+    static LAST: std::sync::Mutex<(Option<std::time::Instant>, Option<u64>)> =
+        std::sync::Mutex::new((None, None));
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if last
+        .0
+        .is_none_or(|at| at.elapsed() > std::time::Duration::from_millis(50))
+    {
+        *last = (
+            Some(std::time::Instant::now()),
+            headroom(crate::host::host().and_then(|h| h.video_memory())),
+        );
+    }
+    last.1
 }
 
 /// Finds an existing placed texture using the same key as `texture_at`.
@@ -1771,7 +1805,8 @@ pub(crate) fn let_go_idle() {
     if !*ON.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_SWEEP").is_none_or(|v| v != "0")) {
         return;
     }
-    let idle_ms = crate::host::vram_idle_ms(crate::host::host().and_then(|h| h.video_memory()));
+    let idle_ms =
+        crate::host::vram_idle_ms(headroom(crate::host::host().and_then(|h| h.video_memory())));
     // For the trail (`crate::host::trail`): how many went, their bytes,
     // and the first one.
     let (mut went, mut bytes, mut first) = (0u64, 0u64, None);

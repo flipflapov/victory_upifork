@@ -119,33 +119,27 @@ pub(crate) fn available_physical_ram() -> Option<u64> {
 }
 
 /// Effective idle timeout (in milliseconds) for VRAM-backed host textures,
-/// by the room the card's budget has left: 15 s with 1.5 GiB or more, 5 s
-/// with 1 GiB, 2.5 s with 512 MiB, else 1 s (over budget too). Never less
-/// than 1,000 ms so handles not yet recorded into a list or slot remain
-/// protected. By share of the budget (1 s from 85 % used) a 12 GB card
-/// with 1.6 GB left let go copies idle for a second: 19 GB of them let go
-/// and 9.8 GB made again in 17 minutes, each detiled and uploaded anew.
-pub(crate) fn vram_idle_ms(video_memory: Option<[u64; 4]>) -> u64 {
+/// by the card's memory left before no more host copies of textures are
+/// made (`crate::resource::headroom`): 15 s with 1 GiB or more, 5 s with
+/// 512 MiB, 2.5 s with 256 MiB, else 1 s (at or past that point too).
+/// Never less than 1,000 ms so handles not yet recorded into a list or slot
+/// remain protected. By share of the budget (1 s from 85 % used) copies
+/// idle for a second were let go and made again: 9.8 GB of them in 17
+/// minutes on a 12 GB card. By the room left in the whole budget (15 s
+/// with 1.5 GiB) the copies kept took the room new ones needed, which are
+/// not made from 90 % of the budget on: 1,291 passes made none.
+pub(crate) fn vram_idle_ms(headroom: Option<u64>) -> u64 {
     const ROOMY_MS: u64 = 15_000;
     const NORMAL_MS: u64 = 5_000;
     const MODERATE_MS: u64 = 2_500;
     const HIGH_MS: u64 = 1_000;
     const MIB: u64 = 1 << 20;
-    let Some([budget, used, ..]) = video_memory else {
-        return NORMAL_MS;
-    };
-    if budget == 0 {
-        return NORMAL_MS;
-    }
-    let room = budget.saturating_sub(used);
-    if room >= 1536 * MIB {
-        ROOMY_MS
-    } else if room >= 1024 * MIB {
-        NORMAL_MS
-    } else if room >= 512 * MIB {
-        MODERATE_MS
-    } else {
-        HIGH_MS
+    match headroom {
+        None => NORMAL_MS,
+        Some(room) if room >= 1024 * MIB => ROOMY_MS,
+        Some(room) if room >= 512 * MIB => NORMAL_MS,
+        Some(room) if room >= 256 * MIB => MODERATE_MS,
+        Some(_) => HIGH_MS,
     }
 }
 
@@ -7687,24 +7681,19 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
     #[test]
     fn vram_idle_ms_scales_with_pressure() {
         use super::vram_idle_ms;
-        let gib = 1024 * 1024 * 1024;
         let mib = 1024 * 1024;
-        // Roomy (1.5 GiB or more left), however full by share
-        assert_eq!(vram_idle_ms(Some([10 * gib, 0, 0, 0])), 15_000);
-        assert_eq!(vram_idle_ms(Some([11204 * mib, 9602 * mib, 0, 0])), 15_000);
-        // Normal (1 GiB to 1.5 GiB left)
-        assert_eq!(vram_idle_ms(Some([10 * gib, 9 * gib, 0, 0])), 5_000);
-        // Moderate (512 MiB to 1 GiB left)
-        assert_eq!(
-            vram_idle_ms(Some([10 * gib, 10 * gib - 600 * mib, 0, 0])),
-            2_500
-        );
-        // High (under 512 MiB left, including over-budget)
-        assert_eq!(vram_idle_ms(Some([100, 85, 0, 0])), 1_000);
-        assert_eq!(vram_idle_ms(Some([10 * gib, 12 * gib, 0, 0])), 1_000);
-        // Missing or zero budget falls back to normal
+        // Roomy (1 GiB or more before no more copies are made)
+        assert_eq!(vram_idle_ms(Some(4096 * mib)), 15_000);
+        assert_eq!(vram_idle_ms(Some(1024 * mib)), 15_000);
+        // Normal (512 MiB to 1 GiB)
+        assert_eq!(vram_idle_ms(Some(750 * mib)), 5_000);
+        // Moderate (256 MiB to 512 MiB)
+        assert_eq!(vram_idle_ms(Some(300 * mib)), 2_500);
+        // High (under 256 MiB, none left included)
+        assert_eq!(vram_idle_ms(Some(100 * mib)), 1_000);
+        assert_eq!(vram_idle_ms(Some(0)), 1_000);
+        // Unknown falls back to normal
         assert_eq!(vram_idle_ms(None), 5_000);
-        assert_eq!(vram_idle_ms(Some([0, 100, 0, 0])), 5_000);
     }
 
     #[test]

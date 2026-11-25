@@ -104,12 +104,20 @@ pub(super) fn run(warm: bool) -> anyhow::Result<()> {
     // frames from 306 to 200 ms (medians of a quarter of an hour each).
     // Textures the title fills keep sides of at most 1024 texels on the
     // card: they filled its 12 GB, and copies were let go and made again.
-    // A value set in the environment wins (VICTORY_TEXTURE_MAX=0: whole).
+    // The frame's preparing (81 ms, 43 of them copies, on a 4.8 fps
+    // median) on more threads than the submitting one: refreshes of host
+    // copies of title memory spread over the snapshot threads, upload
+    // fills over four workers and preludes recorded in parallel.
+    // A value set in the environment wins (VICTORY_TEXTURE_MAX=0: whole;
+    // 0 turns each of the last three off).
     for (name, value) in [
         ("VICTORY_CARD_BUFFERS_MIN_MB", "1"),
         ("VICTORY_CARD_BUFFERS_MB", "1024"),
         ("VICTORY_DISPLAY_MODE", "1920x1080"),
         ("VICTORY_TEXTURE_MAX", "1024"),
+        ("VICTORY_WIDE_REFRESH", "1"),
+        ("VICTORY_FILL_WORKERS", "4"),
+        ("VICTORY_PARALLEL_PRELUDES", "1"),
     ] {
         let set = std::env::var(name).ok();
         if set.is_none() {
