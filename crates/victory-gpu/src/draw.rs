@@ -2435,7 +2435,9 @@ impl State {
         if compute || (early_ms == 0 && bake_ms == 0) {
             return;
         }
-        let is_bake = bake_ms > 0 && self.is_bake_draw(p);
+        // (The title's 51 bake programs are known by name too, after
+        // edsuuu/VI-BR-PORT 10ac68f9.)
+        let is_bake = bake_ms > 0 && (self.is_bake_draw(p) || p.stages.iter().any(|s| s.shader.bakes));
         static FRAME: AtomicU64 = AtomicU64::new(u64::MAX);
         // The milliseconds this frame's bake draws have taken so far: a
         // frame has several, and together they get `bake_ms`.
