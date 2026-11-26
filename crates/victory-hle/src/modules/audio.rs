@@ -557,6 +557,14 @@ fn pump(context: Context, voice: &mut Voice) {
 
 /// Decodes the next frame of the current input into `voice.pcm`; false
 /// when there is nothing left to decode.
+/// Whether an ended XMA voice goes on when the title gives it input again,
+/// and only whole blocks are published (`VICTORY_XMA_REFILL=1`, from
+/// codec-d/cool_fox fabb872a; off by default).
+fn xma_refill() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_XMA_REFILL").is_some_and(|v| v == "1"))
+}
+
 fn decode(context: Context, voice: &mut Voice) -> bool {
     let valid = context.field(0, 20, 2);
     if voice.ended {
