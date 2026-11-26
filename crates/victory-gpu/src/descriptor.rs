@@ -1960,7 +1960,6 @@ mod tests {
         heap[0] = 0;
     }
 
-<<<<<<< HEAD
     /// Constant buffer views are named whole in their records: any address
     /// a program can have, any size below 16 KiB, multiples of 256 bytes
     /// up to 4 MiB; what does not fit says so.
