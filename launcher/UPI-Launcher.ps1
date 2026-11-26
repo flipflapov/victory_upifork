@@ -107,10 +107,15 @@ if ($Turbo -and !$Safe) {
     # them: no copy, no refresh, nothing sent up (stage 1 of crate::inplace;
     # their pages stay in RAM while in place, at most 4 GB)
     $settings['VICTORY_INPLACE'] = '1'
-    # the census of the title memory copied (2.5 and 5 minutes in): how much
-    # of it is one run of a section, which renderer port 1's way could open
-    # in place as well (the next step for the 3.2 GB of window copies)
-    $settings['VICTORY_INPLACE_CENSUS'] = '1'
+    # windows of title memory outside buffers cut on a 1 MiB grid, and from
+    # the first address asked for in their cell on (Neptune by Dolberth's
+    # 16 GB profile). The census (VICTORY_INPLACE_CENSUS=1, run 2026-11-26
+    # 22:50): of 2.6 GB of windows 1.8 GB lie over the page pool with pages
+    # not mapped, 4 MB are one run of a section; a 4 MiB window is copied
+    # and kept whole however little of it is read (3.3 GB held, 1.6 GB of
+    # it ever asked for, in run 60 of this tree's notes)
+    $settings['VICTORY_WINDOW_KB'] = '1024'
+    $settings['VICTORY_WINDOW_TAILS'] = '1'
     # (Neptune by Dolberth's smart copy-back, VICTORY_SMART_COPY_BACK=1, is
     # not set: in run 2026-11-26 22:10 it cut copying back from ~50 to ~7 ms
     # a frame and the frame rate not at all, and faces came out crumpled:
