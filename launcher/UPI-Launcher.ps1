@@ -107,6 +107,10 @@ if ($Turbo -and !$Safe) {
     # them: no copy, no refresh, nothing sent up (stage 1 of crate::inplace;
     # their pages stay in RAM while in place, at most 4 GB)
     $settings['VICTORY_INPLACE'] = '1'
+    # the census of the title memory copied (2.5 and 5 minutes in): how much
+    # of it is one run of a section, which renderer port 1's way could open
+    # in place as well (the next step for the 3.2 GB of window copies)
+    $settings['VICTORY_INPLACE_CENSUS'] = '1'
     # (Neptune by Dolberth's smart copy-back, VICTORY_SMART_COPY_BACK=1, is
     # not set: in run 2026-11-26 22:10 it cut copying back from ~50 to ~7 ms
     # a frame and the frame rate not at all, and faces came out crumpled:

@@ -1258,6 +1258,16 @@ fn real_part(spans: &[(u64, u64, bool)]) -> Vec<String> {
     lines
 }
 
+/// `VICTORY_INPLACE_CENSUS=1`: the census alone, without the probe (no
+/// heap of the probe's own is opened, nothing is run on the card), at 2.5
+/// and 5 minutes: how many of the copies of title memory are private memory
+/// committed whole, one run of a section (what renderer port 1's way can
+/// open in place), scattered pages or with holes.
+fn census_only() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_INPLACE_CENSUS").is_some_and(|v| v == "1"))
+}
+
 /// Called once a second by the thread that submits, before a submission
 /// (`host::sweep`): with [`probe_level`], the probe at the first call, the
 /// census (on a thread of its own: it asks Windows about every copy) 30
@@ -1266,13 +1276,14 @@ pub(crate) fn tick() {
     if level() > 0 {
         say();
     }
-    if probe_level() == 0 {
+    if probe_level() == 0 && !census_only() {
         return;
     }
     static STARTED: AtomicU64 = AtomicU64::new(0);
     static DONE: AtomicU64 = AtomicU64::new(0);
     let now = crate::host::now_ms().max(1);
     let started = match STARTED.compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed) {
+        Ok(_) if probe_level() == 0 => now,
         Ok(_) => {
             let Some(host) = crate::host::host() else {
                 return;
@@ -1288,9 +1299,11 @@ pub(crate) fn tick() {
         }
         Err(started) => started,
     };
+    // (the census alone: at 2.5 and 5 minutes, in the world by then)
+    let (first, second) = if probe_level() == 0 { (150_000, 300_000) } else { (30_000, 150_000) };
     let due = match DONE.load(Ordering::Relaxed) {
-        0 => now >= started + 30_000,
-        1 => now >= started + 150_000,
+        0 => now >= started + first,
+        1 => now >= started + second,
         _ => false,
     };
     if due {
