@@ -1,3 +1,50 @@
+# ЮПИ Лаунчер (victory_upifork)
+
+Сборка VIctory для **NVIDIA RTX 3060 12 ГБ и ПК с 16 ГБ оперативной памяти**
+(Windows 11). Файлов игры здесь нет: нужна своя копия (Series 1.0.2.1).
+
+## Установка и запуск
+
+1. `git pull`, затем `.\Setup.cmd`. В первый раз он спросит, где лежит
+   `game_scarlett_master.exe`, соберёт `victory.exe` (release) и поставит
+   всё в `%LOCALAPPDATA%\UPI Launcher` (сохранения остаются в `state`).
+2. Ярлыки с иконкой «VI» на рабочем столе и в меню «Пуск»:
+   - **ЮПИ Лаунчер** — профиль Series S (меньше памяти, настройки игры ниже);
+   - **ЮПИ Лаунчер (Series X)** — профиль Series X;
+   - **ЮПИ Лаунчер (безопасный)** — Series S без правок рендера и новейшей
+     многопоточности: первое, что пробовать, если что-то не так.
+3. Логи: `%LOCALAPPDATA%\UPI Launcher\logs`, путь к последнему — в `latest.txt`.
+   Первый запуск долгий: переводятся все шейдеры (кэш — `cache-coolfox`).
+
+Настройки лаунчера — в `launcher/UPI-Launcher.ps1` (переменная `VICTORY_*`,
+заданная вручную, важнее): профиль cool_fox «pareto-residency», три настройки
+GTX 1660 (`CARD_BUFFERS_MB=1024`, `CARD_WINDOWS_MB=768`, `TEXTURE_MIP_DROP=2`,
+на 3 — быстрее и мягче), `WINDOW_BUDGET_MB=1024` для 16 ГБ и правки рендера 1 и 2
+(`PORT_CONSTANTS`, `PORT_DESCRIPTORS`).
+
+## Из чего собрано
+
+- **[Pavl3000/cgbj-fork](https://github.com/Pavl3000/cgbj-fork)**, ветка
+  `wave2/upstream`: уцелевшая копия codec-d/cool_fox (проверен на RTX 12 ГБ,
+  32 ГБ ОЗУ) с первыми двумя волнами переносов.
+- **[Impre-visible/victory-gtx1660](https://github.com/Impre-visible/victory-gtx1660)**:
+  все шесть патчей (0001–0007) и настройки, давшие ~100 мс на кадр на GTX 1660.
+- **[avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX)**
+  `main` (`9576c45`) целиком, слиянием: правки рендера 1 и 2, перевод всех
+  шейдеров игры, исправления для 32-потоковых волн (#142, #82, #66, #4),
+  бюджет ОЗУ для «окон» (#77), переключатель частоты кадров, подсветка.
+  Конфликты решены в пользу поведения cgbj (cool_fox) там, где оно проверено
+  на NVIDIA: бюджеты памяти включены, `draw.rs` от cgbj.
+- **[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)**:
+  его история переписана; нужное (подсветка, пропуск лучей экранных зондов)
+  уже есть в этом дереве. Проходы очистки шейдеров (2155 строк) отложены.
+- **[fablinoo/kelvaroq](https://github.com/fablinoo/kelvaroq)**: отдельная
+  архитектура; его новый слой памяти ещё не опубликован — брать пока нечего.
+
+Авторы сохранены в истории коммитов. Прежняя основа (DexNom) — коммит `9cb06dc`.
+
+---
+
 > ## This fork
 >
 > A fork of **codec-d/cool_fox** at `f4b48ad` (26 November 2026), whose repository
