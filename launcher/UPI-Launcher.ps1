@@ -18,6 +18,10 @@
 #             memory: slow on a PC of 16 GB, it pages)
 #   -Safe     Series S without the newest threading
 #             (the first thing to try when something is wrong)
+#   -Diag     the diagnostics build (Setup.cmd -Diag makes it): a timeline
+#             of 3 frames at 4 and at 5.5 minutes (logs\timeline-*.json and
+#             .txt: the chain of work and waits each frame came out of) and
+#             the memory lines by category
 #   -NoPrep   leaves the PC as it is (by default, while the game runs: the
 #             high performance power plan, Game DVR off, and programs in the
 #             background at below normal CPU and low memory priority with
@@ -26,11 +30,11 @@
 # A VICTORY_* variable set before this script runs wins over its setting.
 # Keep this file ASCII: Windows PowerShell 5.1 reads a script without a byte
 # order mark in the system code page.
-param([switch]$Turbo, [switch]$SeriesX, [switch]$Safe, [switch]$NoPrep)
+param([switch]$Turbo, [switch]$SeriesX, [switch]$Safe, [switch]$NoPrep, [switch]$Diag)
 $ErrorActionPreference = 'Stop'
 
 $here = $PSScriptRoot
-$runtime = Join-Path $here 'victory.exe'
+$runtime = Join-Path $here $(if ($Diag) { 'victory-diag.exe' } else { 'victory.exe' })
 $config = Join-Path $here 'game-path.txt'
 if (!(Test-Path -LiteralPath $runtime -PathType Leaf) -or !(Test-Path -LiteralPath $config -PathType Leaf)) {
     Write-Host "victory.exe or game-path.txt is missing in $here. Run Setup.cmd again."
@@ -103,11 +107,10 @@ if ($Turbo -and !$Safe) {
     # them: no copy, no refresh, nothing sent up (stage 1 of crate::inplace;
     # their pages stay in RAM while in place, at most 4 GB)
     $settings['VICTORY_INPLACE'] = '1'
-    # Neptune by Dolberth's smart copy-back (their tested profile): what
-    # shaders write into title buffers over 4 KB stays on the card until a
-    # copy or fill of the title reads it (63 MB a frame came back here)
-    $settings['VICTORY_SMART_COPY_BACK'] = '1'
-    $settings['VICTORY_SMART_COPY_BACK_KB'] = '4'
+    # (Neptune by Dolberth's smart copy-back, VICTORY_SMART_COPY_BACK=1, is
+    # not set: in run 2026-11-26 22:10 it cut copying back from ~50 to ~7 ms
+    # a frame and the frame rate not at all, and faces came out crumpled:
+    # passes read what shaders wrote before it came back.)
 }
 foreach ($k in $settings.Keys) {
     if (!(Test-Path "Env:$k")) { Set-Item "Env:$k" $settings[$k] }
@@ -115,9 +118,17 @@ foreach ($k in $settings.Keys) {
 if (!$env:VICTORY_DATA_DIR) { $env:VICTORY_DATA_DIR = Join-Path $here 'state' }
 if (!$env:VICTORY_CACHE_DIR) { $env:VICTORY_CACHE_DIR = Join-Path $here 'cache-coolfox' }
 $console = if ($SeriesX) { 'series-x' } else { 'series-s' }
+if ($Diag) {
+    # Diagnostics: the timeline (Chrome trace and its text summary) and the
+    # memory lines by category.
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $env:VICTORY_TIMELINE = '240+330,3,' + (Join-Path (Join-Path $here 'logs') "timeline-$stamp.json")
+    $env:VICTORY_MEMORY_CATEGORIES = '1'
+}
 $mode = @($console)
 if ($Turbo -and !$Safe) { $mode += 'turbo' }
 if ($Safe) { $mode += 'safe' }
+if ($Diag) { $mode += 'diag' }
 
 # What Windows can commit (RAM and page file): the process commits 19-20 GB
 # in the world. With 24 GB in all (a small page file) it had under 1 GB left

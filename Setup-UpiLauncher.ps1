@@ -2,7 +2,10 @@
 param(
     [string] $GamePath,
     [string] $InstallDir = (Join-Path $env:LOCALAPPDATA 'UPI Launcher'),
-    [string] $ShortcutDirectory = [Environment]::GetFolderPath('Programs')
+    [string] $ShortcutDirectory = [Environment]::GetFolderPath('Programs'),
+    # Also the diagnostics build (victory-diag.exe) and its shortcut: a
+    # timeline of a few frames for finding where a frame's time goes.
+    [switch] $Diag
 )
 
 $ErrorActionPreference = 'Stop'
@@ -77,6 +80,10 @@ try {
         throw 'Build failed. Check the compiler output and the C++ workload and Windows SDK listed in the README.'
     }
     $release = Join-Path $targetDir "$target/release"
+    if ($Diag) {
+        & cargo build --locked --profile diag -p victory --features diagnostics --target $target --target-dir $targetDir
+        if ($LASTEXITCODE -ne 0) { throw 'The diagnostics build failed.' }
+    }
     & (Join-Path $release 'victory.exe') inspect $game.FullName | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'The runtime could not read the selected game executable.' }
 } finally { Pop-Location }
@@ -86,6 +93,7 @@ $files = @(
     @{ From = (Join-Path $release 'victory.exe'); To = 'victory.exe' }
     @{ From = (Join-Path $PSScriptRoot 'launcher/UPI-Launcher.ps1'); To = 'UPI-Launcher.ps1' }
 )
+if ($Diag) { $files += @{ From = (Join-Path $targetDir "$target/diag/victory.exe"); To = 'victory-diag.exe' } }
 foreach ($file in $files) {
     $destination = Join-Path $InstallDir $file.To
     $temp = Join-Path $InstallDir ([IO.Path]::GetRandomFileName())
@@ -196,6 +204,8 @@ $script = Join-Path $InstallDir 'UPI-Launcher.ps1'
 $safe = ' (' + (-join [char[]](0x0431, 0x0435, 0x0437, 0x043E, 0x043F, 0x0430, 0x0441, 0x043D, 0x044B, 0x0439)) + ')'
 # " (turbo)" in Russian, the same way.
 $turbo = ' (' + (-join [char[]](0x0442, 0x0443, 0x0440, 0x0431, 0x043E)) + ')'
+# " (diagnostics)" in Russian, the same way.
+$diagName = ' (' + (-join [char[]](0x0434, 0x0438, 0x0430, 0x0433, 0x043D, 0x043E, 0x0441, 0x0442, 0x0438, 0x043A, 0x0430)) + ')'
 $desktop = [Environment]::GetFolderPath('Desktop')
 foreach ($stale in 'DexNom Runtime.lnk', 'DexNom Runtime (Experimental RT).lnk', "$AppName (Series S).lnk") {
     foreach ($folder in $ShortcutDirectory, $desktop) {
@@ -206,12 +216,14 @@ foreach ($stale in 'DexNom Runtime.lnk', 'DexNom Runtime (Experimental RT).lnk',
 $shell = New-Object -ComObject WScript.Shell
 foreach ($folder in $ShortcutDirectory, $desktop) {
     [IO.Directory]::CreateDirectory($folder) | Out-Null
-    foreach ($entry in @(
+    $entries = @(
         @{ Name = $AppName; Switch = '' }
         @{ Name = "$AppName$turbo"; Switch = ' -Turbo' }
         @{ Name = "$AppName (Series X)"; Switch = ' -SeriesX' }
         @{ Name = "$AppName$safe"; Switch = ' -Safe' }
-    )) {
+    )
+    if ($Diag) { $entries += @{ Name = "$AppName$diagName"; Switch = ' -Turbo -Diag' } }
+    foreach ($entry in $entries) {
         $shortcut = $shell.CreateShortcut((Join-Path $folder ($entry.Name + '.lnk')))
         $shortcut.TargetPath = $powershell
         $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$script`"$($entry.Switch)"
