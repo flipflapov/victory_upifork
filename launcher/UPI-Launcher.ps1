@@ -1,10 +1,15 @@
 # UPI Launcher: starts the title with this fork's settings for an NVIDIA card
 # of 12 GB and a PC of 16 GB of RAM. Setup.cmd installs it beside victory.exe
 # in %LOCALAPPDATA%\UPI Launcher; its shortcuts pass -SeriesX or -Safe.
-#   (none)    Series S, every setting below: the title's own lower settings
-#             and about 7.6 GB of title memory instead of 13.5
-#   -SeriesX  the Series X profile, same settings
-#   -Safe     Series S without the renderer ports and the newest threading
+#   (none)    Series S, codec-d/cool_fox's profile as its launcher runs Series
+#             S, the GTX 1660 settings: the title's own lower settings and
+#             about 7.6 GB of title memory instead of 13.5
+#   -SeriesX  the Series X profile, with the renderer ports 1 and 2 as well
+#             (made on Series X; on Series S the picture stayed black: port 2
+#             missed 931 descriptor records written by stores it does not
+#             patch, title+0x18849c above all, and port 1 found the heap not
+#             one stretch of a section)
+#   -Safe     Series S without the newest threading
 #             (the first thing to try when something is wrong)
 # A VICTORY_* variable set before this script runs wins over its setting.
 # Keep this file ASCII: Windows PowerShell 5.1 reads a script without a byte
@@ -59,18 +64,21 @@ $settings = [ordered]@{
     VICTORY_LEVELS_ON_DEMAND    = '0'
     # 16 GB of RAM: loose copies of title windows capped while RAM is short
     VICTORY_WINDOW_BUDGET_MB    = '1024'
-    # avatarmanz/VIctory-7900XTX renderer ports 1 and 2 (byte-checked
-    # against this executable): the title's 32-bit graphics heap used in
-    # place, and its descriptor stores marking their slots
-    VICTORY_PORT_CONSTANTS      = '1'
-    VICTORY_PORT_DESCRIPTORS    = '1'
     # the frame statistics line (fps, ms/frame) in the log
     VICTORY_LOG                 = 'info'
 }
 if ($Safe) {
-    foreach ($k in 'VICTORY_PORT_CONSTANTS', 'VICTORY_PORT_DESCRIPTORS', 'VICTORY_THIN', 'VICTORY_JOIN_PARTS', 'VICTORY_UPLOAD_AHEAD') {
+    foreach ($k in 'VICTORY_THIN', 'VICTORY_JOIN_PARTS', 'VICTORY_UPLOAD_AHEAD') {
         $settings.Remove($k)
     }
+}
+if ($SeriesX -and !$Safe) {
+    # avatarmanz/VIctory-7900XTX renderer ports 1 and 2 (byte-checked
+    # against this executable; made on Series X): the title's 32-bit
+    # graphics heap used in place, and its descriptor stores marking their
+    # slots
+    $settings['VICTORY_PORT_CONSTANTS'] = '1'
+    $settings['VICTORY_PORT_DESCRIPTORS'] = '1'
 }
 foreach ($k in $settings.Keys) {
     if (!(Test-Path "Env:$k")) { Set-Item "Env:$k" $settings[$k] }
