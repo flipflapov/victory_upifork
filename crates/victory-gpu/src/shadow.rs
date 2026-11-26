@@ -2999,7 +2999,10 @@ pub(crate) fn let_go_idle() {
     {
         let mut band = WINDOW_BAND.lock().unwrap_or_else(|e| e.into_inner());
         *band = crate::host::ram_band(*band, working, private, free, commit, total, limit);
-        match *band {
+        // The card's share of the PC's memory near its budget: as the High
+        // band (`host::shared_pressure`), whatever the PC's RAM says.
+        let pressed = crate::host::shared_pressure();
+        match if pressed { crate::host::RamBand::High } else { *band } {
             crate::host::RamBand::Calm => {}
             crate::host::RamBand::Watch => {
                 idle_ms = idle_ms.min(10_000);

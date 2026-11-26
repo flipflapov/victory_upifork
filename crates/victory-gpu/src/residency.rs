@@ -168,7 +168,9 @@ pub(crate) fn headroom() -> Option<u64> {
 }
 
 pub(crate) fn pressured() -> bool {
-    PRESSURED.load(Ordering::Relaxed)
+    // (also when the card's share of the PC's memory nears its budget:
+    // upload and staging buffers count against it, `host::shared_pressure`)
+    PRESSURED.load(Ordering::Relaxed) || (on() && crate::host::shared_pressure())
 }
 
 /// True when OS commit headroom is critically low (< 1.5 GiB) or an allocation

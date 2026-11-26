@@ -107,15 +107,18 @@ if ($Turbo -and !$Safe) {
     # them: no copy, no refresh, nothing sent up (stage 1 of crate::inplace;
     # their pages stay in RAM while in place, at most 4 GB)
     $settings['VICTORY_INPLACE'] = '1'
-    # windows of title memory outside buffers cut on a 1 MiB grid, and from
-    # the first address asked for in their cell on (Neptune by Dolberth's
-    # 16 GB profile). The census (VICTORY_INPLACE_CENSUS=1, run 2026-11-26
-    # 22:50): of 2.6 GB of windows 1.8 GB lie over the page pool with pages
-    # not mapped, 4 MB are one run of a section; a 4 MiB window is copied
-    # and kept whole however little of it is read (3.3 GB held, 1.6 GB of
-    # it ever asked for, in run 60 of this tree's notes)
-    $settings['VICTORY_WINDOW_KB'] = '1024'
-    $settings['VICTORY_WINDOW_TAILS'] = '1'
+    # (Not VICTORY_WINDOW_KB=1024 with VICTORY_WINDOW_TAILS=1, Neptune's 16 GB
+    # profile: in run 2026-11-26 22:58 the windows went from 628 to 2,000-3,000
+    # and their copies from 2.6-3.2 to 4.5-5 GB, the same memory standing in
+    # several windows, and the card's share of the PC's memory overflowed.)
+    # Windows of title memory in the card's own memory, filled by the CPU
+    # through the bus, with no copy in the PC's memory, where the PC and the
+    # driver offer it (a resizable BAR); else as before. They stop going
+    # there at 80 % of the card's budget.
+    $settings['VICTORY_WINDOWS_BAR_MB'] = '2048'
+    # Six threads landing what shaders wrote (three by default on 12 logical
+    # processors): they wait on title memory that pages.
+    $settings['VICTORY_LAND_THREADS'] = '6'
     # (Neptune by Dolberth's smart copy-back, VICTORY_SMART_COPY_BACK=1, is
     # not set: in run 2026-11-26 22:10 it cut copying back from ~50 to ~7 ms
     # a frame and the frame rate not at all, and faces came out crumpled:

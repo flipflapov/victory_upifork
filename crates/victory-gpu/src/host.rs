@@ -515,6 +515,40 @@ pub(crate) fn ram_sample() -> Option<(u64, u64, u64, u64, u64, u64)> {
     ))
 }
 
+/// Whether the PC's memory the card's objects hold (DXGI's non-local
+/// segment: upload, read-back and shared buffers, host copies of title
+/// memory, heaps opened on it) is near what the system lets the card have
+/// (`VICTORY_SHARED_PRESSURE_PERCENT`, 85 by default): past the budget,
+/// buffers are refused with E_OUTOFMEMORY. Run 2026-11-26 22:58: 7.7 GB held
+/// of a 7.5 GB budget on 16 GB of RAM, 34,366 upload and 12,516 shared buffers
+/// refused in a minute, shadows and models broken. Asked at most every 250 ms.
+pub(crate) fn shared_pressure() -> bool {
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    static AT: AtomicU64 = AtomicU64::new(0);
+    static PRESSED: AtomicBool = AtomicBool::new(false);
+    static PERCENT: OnceLock<u64> = OnceLock::new();
+    let percent = *PERCENT.get_or_init(|| {
+        std::env::var("VICTORY_SHARED_PRESSURE_PERCENT").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(85).clamp(10, 100)
+    });
+    let now = coarse_ms();
+    let last = AT.load(Ordering::Relaxed);
+    if now >= last + 250 && AT.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+        && let Some([_, shared]) = host().and_then(Host::video_memory_groups)
+    {
+        let pressed = shared[0] > 0 && shared[1].saturating_mul(100) >= shared[0].saturating_mul(percent);
+        if pressed != PRESSED.swap(pressed, Ordering::Relaxed) {
+            tracing::info!(
+                pressed,
+                held_mb = shared[1] >> 20,
+                budget_mb = shared[0] >> 20,
+                percent,
+                "the PC's memory the card's objects hold, against its budget: idle copies of windows let go sooner"
+            );
+        }
+    }
+    PRESSED.load(Ordering::Relaxed)
+}
+
 /// Every 10 s, in every build: the process's memory and the PC's, to see
 /// whether a PC with little RAM pages (a working set well below what the
 /// process committed, little RAM free and many page faults a second: the
@@ -543,7 +577,7 @@ fn memory_line() {
     // The card's own memory, and the PC's that the card's objects hold
     // (upload, read-back and shared buffers: part of what is committed).
     let card = host().and_then(Host::video_memory_groups).map_or("?".to_owned(), |[own, shared]| {
-        format!("the card's own {} of {} MB, the PC's held by the card's objects {} MB", mb(own[1]), mb(own[0]), mb(shared[1]))
+        format!("the card's own {} of {} MB, the PC's held by the card's objects {} of {} MB", mb(own[1]), mb(own[0]), mb(shared[1]), mb(shared[0]))
     });
     // What of it is ours, by kind (alive now): host copies of title memory
     // (the PC's shared buffers and the card's alike), of them the windows outside buffers, and the
