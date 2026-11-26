@@ -116,6 +116,12 @@ if ($Turbo -and !$Safe) {
     # driver offer it (a resizable BAR); else as before. They stop going
     # there at 80 % of the card's budget.
     $settings['VICTORY_WINDOWS_BAR_MB'] = '2048'
+    # A queue's wait for a fence counts as met once the line has given the
+    # card its signal (the title's queues all go to the host's one queue, in
+    # order), not only once the card ran it and the relay landed it: run
+    # 2026-11-27 00:00 had every party waiting for another, the card half
+    # busy and the title 330 ms a frame at presents.
+    $settings['VICTORY_GPU_ORDERED_WAITS'] = '1'
     # (VICTORY_LAND_THREADS=6 was tried in run 2026-11-26 23:30: the landings
     # took as long as with the default 3, waiting on title memory that pages.)
     # (Neptune by Dolberth's smart copy-back, VICTORY_SMART_COPY_BACK=1, is

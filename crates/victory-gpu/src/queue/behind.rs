@@ -537,7 +537,15 @@ impl Work for Job {
 
     fn met(ask: &Ask) -> bool {
         match ask {
-            &Ask::Wait(fence, value) => crate::fence::completed(fence as This) >= value,
+            &Ask::Wait(fence, value) => {
+                crate::fence::completed(fence as This) >= value || {
+                    let ordered = gpu_ordered() && crate::fence::sent(fence as This) >= value;
+                    if ordered {
+                        STATS[ORDERED].fetch_add(1, Relaxed);
+                    }
+                    ordered
+                }
+            }
             Ask::Value(wait) => super::value_met(wait),
             Ask::Lists(recordings) => recordings.iter().all(|r| r.done()),
         }
@@ -573,7 +581,10 @@ impl Work for Job {
                 }
             }
             &Job::Wait(fence, value) => {
-                if crate::fence::completed(fence as This) < value && !signals.iter().any(|&(f, v)| f == fence && v >= value) {
+                if crate::fence::completed(fence as This) < value
+                    && !(gpu_ordered() && crate::fence::sent(fence as This) >= value)
+                    && !signals.iter().any(|&(f, v)| f == fence && v >= value)
+                {
                     return Err(next);
                 }
             }
@@ -652,12 +663,14 @@ impl Work for Job {
                 // (A part that had no list is one all the same.)
                 QUEUED.fetch_sub(1 + parts.len() as u64, Relaxed);
                 for (fence, value) in signals {
+                    crate::fence::sent_to_card(fence as This, value);
                     if !crate::host::late_signal(fence, value) {
                         crate::fence::set(fence as This, value);
                     }
                 }
             }
             Job::Signal(fence, value) => {
+                crate::fence::sent_to_card(fence as This, value);
                 if !crate::host::late_signal(fence, value) {
                     crate::fence::set(fence as This, value);
                 }
@@ -693,7 +706,7 @@ static QUEUED: AtomicU64 = AtomicU64::new(0);
 /// threads of the title waited, in microseconds, for room in the line, at a
 /// present, and for a drain, and the drains; what our thread worked; waits
 /// not met at a present.
-static STATS: [AtomicU64; 11] = [const { AtomicU64::new(0) }; 11];
+static STATS: [AtomicU64; 12] = [const { AtomicU64::new(0) }; 12];
 const RUNS: usize = 0;
 const PRESENTS: usize = 1;
 const DEPTH: usize = 2;
@@ -706,6 +719,9 @@ const BUSY: usize = 8;
 const FORCED: usize = 9;
 /// Parts prepared together with the one before them.
 const JOINED: usize = 10;
+/// Waits of a queue met by the order of the host's one queue
+/// ([`gpu_ordered`]), not yet by the fence's value.
+const ORDERED: usize = 11;
 
 /// How many submissions may be in the line when a submit call returns
 /// (`VICTORY_SUBMIT_DEPTH`; 64: about two frames of the title's).
@@ -933,7 +949,8 @@ pub(super) fn line(frames: f64) {
         "submissions prepared by a thread of ours, per frame (VICTORY_ASYNC_SUBMIT): {:.1} in {:.1} presents, {:.1} in the line \
          when one was added (at most {:.0}); that thread worked {:.1} ms; threads of the title waited {:.1} ms for room in the \
          line, {:.1} ms at presents, {:.1} ms in {:.1} drains; waits not met at a present {:.2}; {:.1} of the \
-         submissions were prepared together with the one before them (VICTORY_JOIN_PARTS)",
+         submissions were prepared together with the one before them (VICTORY_JOIN_PARTS); {:.1} queue waits met by the \
+         order of the card's one queue before their fence's value (VICTORY_GPU_ORDERED_WAITS)",
         s[RUNS] / frames,
         s[PRESENTS] / frames,
         s[DEPTH] / s[RUNS].max(1.0),
@@ -944,8 +961,28 @@ pub(super) fn line(frames: f64) {
         ms(DRAINING),
         s[DRAINS] / frames,
         s[FORCED] / frames,
-        s[JOINED] / frames
+        s[JOINED] / frames,
+        s[ORDERED] / frames
     );
+}
+
+/// Whether a queue's wait for a fence counts as met once our line has given
+/// the card the signal it waits for (`VICTORY_GPU_ORDERED_WAITS=1`; off by
+/// default), not only once the signal has run and landed.
+///
+/// The title's queues all go to the host's one queue, in the line's order: a
+/// submission given to it after the signal runs after the work before the
+/// signal. Waiting for the value made every wait between the title's queues
+/// a round trip: the card ran the work, the relay landed it and told the
+/// fence, and only then was the next submission prepared, the card idle
+/// meanwhile (run 2026-11-27 00:00: our thread worked 91 ms a frame, the relay
+/// waited 147 ms for the card, the title 330 ms at presents, the card about
+/// half busy). What the preparing of a submission reads of title memory that
+/// flights in the air write still waits for them to land
+/// (`host::late_blocked`), as for every submission sent ahead.
+fn gpu_ordered() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_GPU_ORDERED_WAITS").is_some_and(|v| v == "1"))
 }
 
 #[cfg(test)]

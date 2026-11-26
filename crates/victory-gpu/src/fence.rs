@@ -37,6 +37,9 @@ struct Fence {
     flags: u32,
     /// Events to set once the value reaches theirs (handles as integers).
     waiters: Mutex<Vec<(u64, usize)>>,
+    /// The value the last signal our line gave to the card's one queue
+    /// will set ([`sent_to_card`]); the value it holds until then.
+    sent: AtomicU64,
 }
 
 fn fence<'a>(this: This) -> &'a Fence {
@@ -57,6 +60,7 @@ pub(crate) extern "system" fn create(
         value: AtomicU64::new(initial),
         flags,
         waiters: Mutex::new(Vec::new()),
+        sent: AtomicU64::new(initial),
     });
     object::hand_out(FENCE, fence, iid, &FENCE_IIDS, out)
 }
@@ -151,6 +155,19 @@ extern "system" fn set_event_on_completion(this: This, value: u64, event: *mut c
     waiters.push((value, event as usize));
     S_OK
 }
+/// The line of submissions (`queue::behind`) gave the card the signal of
+/// `value`: everything given to the host's one queue after it runs after
+/// what came before it, though the value is set only when it has run and
+/// landed.
+pub(crate) fn sent_to_card(this: This, value: u64) {
+    fence(this).sent.store(value, Ordering::Release);
+}
+
+/// The value of the last signal given to the card ([`sent_to_card`]).
+pub(crate) fn sent(this: This) -> u64 {
+    fence(this).sent.load(Ordering::Acquire)
+}
+
 /// Moves the fence to `value` and sets the events that waited for it.
 pub(crate) fn set(this: This, value: u64) {
     let fence = fence(this);
