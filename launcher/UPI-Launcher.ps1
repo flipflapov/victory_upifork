@@ -11,7 +11,9 @@
 #             card's memory instead of 1. Port 7 is left out: on 6 cores its
 #             heaps' records kept the submitting thread waiting ~40 ms a
 #             frame (run 2026-11-26 19:02); port 5 too: it translates every
-#             shader again and was measured on AMD only.
+#             shader again and was measured on AMD only. Also the title's
+#             committed graphics memory used in place (VICTORY_INPLACE=1):
+#             its windows were 3.1-3.6 GB of copies in the PC's 16 GB.
 #   -SeriesX  the Series X profile, without the ports (13.5 GB of title
 #             memory: slow on a PC of 16 GB, it pages)
 #   -Safe     Series S without the newest threading
@@ -91,6 +93,11 @@ if ($Turbo -and !$Safe) {
     # buffer copies in the card's memory, not the PC's 16 GB (they stop
     # going there while less than a fifth of the card's budget is free)
     $settings['VICTORY_CARD_BUFFERS_MB'] = '2048'
+    # windows of the title's committed graphics memory (its vertex, index
+    # and constant pools, ~3.9 GB) read by the card where the title has
+    # them: no copy, no refresh, nothing sent up (stage 1 of crate::inplace;
+    # their pages stay in RAM while in place, at most 4 GB)
+    $settings['VICTORY_INPLACE'] = '1'
 }
 foreach ($k in $settings.Keys) {
     if (!(Test-Path "Env:$k")) { Set-Item "Env:$k" $settings[$k] }
@@ -102,11 +109,20 @@ $mode = @($console)
 if ($Turbo -and !$Safe) { $mode += 'turbo' }
 if ($Safe) { $mode += 'safe' }
 
+# What Windows can commit (RAM and page file): the process commits 19-20 GB
+# in the world. With 24 GB in all (a small page file) it had under 1 GB left
+# and held texture uploads back (run 2026-11-26 21:17).
+$commitGb = 0
+try { $commitGb = [math]::Round((Get-CimInstance Win32_OperatingSystem).TotalVirtualMemorySize / 1MB) } catch { }
+if ($commitGb -gt 0 -and $commitGb -lt 40) {
+    Write-Warning "Windows can commit only $commitGb GB (RAM + page file). Set the page file on C: to 49152 MB: System, About, Advanced system settings, Performance, Advanced, Virtual memory. With less the game slows down and holds textures back."
+}
+
 $logs = Join-Path $here 'logs'
 [IO.Directory]::CreateDirectory($logs) | Out-Null
 $log = Join-Path $logs ('run-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + ($mode -join '-') + '.log')
 [IO.File]::WriteAllText((Join-Path $logs 'latest.txt'), $log)
-$header = @("Runtime $runtime", "Game $game", "console $console", "mode $($mode -join ', ')")
+$header = @("Runtime $runtime", "Game $game", "console $console", "mode $($mode -join ', ')", "commit limit $commitGb GB")
 $header += Get-ChildItem Env:VICTORY_* | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Value)" }
 [IO.File]::WriteAllLines($log, [string[]]$header)
 
