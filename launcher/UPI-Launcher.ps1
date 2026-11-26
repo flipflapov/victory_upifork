@@ -1,20 +1,23 @@
 # UPI Launcher: starts the title with this fork's settings for an NVIDIA card
 # of 12 GB and a PC of 16 GB of RAM. Setup.cmd installs it beside victory.exe
-# in %LOCALAPPDATA%\UPI Launcher; its shortcuts pass -SeriesX or -Safe.
+# in %LOCALAPPDATA%\UPI Launcher; its shortcuts pass -Turbo, -SeriesX or -Safe.
 #   (none)    Series S, codec-d/cool_fox's profile as its launcher runs Series
 #             S, the GTX 1660 settings: the title's own lower settings and
 #             about 7.6 GB of title memory instead of 13.5
-#   -SeriesX  the Series X profile, with the renderer ports 1 and 2 as well
-#             (made on Series X; on Series S the picture stayed black: port 2
-#             missed 931 descriptor records written by stores it does not
-#             patch, title+0x18849c above all, and port 1 found the heap not
-#             one stretch of a section)
+#   -Turbo    the same with the renderer ports avatarmanz/VIctory-7900XTX
+#             plays Series S with: 1 (the title's graphics heap in place),
+#             2 (its descriptor stores mark their slots), 6 (the write
+#             guards' lock shared) and 7 (the journal in parts). Port 5 is
+#             left out: it translates every shader again and reads constant
+#             buffers as raw bytes, which was measured on AMD only.
+#   -SeriesX  the Series X profile, without the ports (13.5 GB of title
+#             memory: slow on a PC of 16 GB, it pages)
 #   -Safe     Series S without the newest threading
 #             (the first thing to try when something is wrong)
 # A VICTORY_* variable set before this script runs wins over its setting.
 # Keep this file ASCII: Windows PowerShell 5.1 reads a script without a byte
 # order mark in the system code page.
-param([switch]$SeriesX, [switch]$Safe)
+param([switch]$Turbo, [switch]$SeriesX, [switch]$Safe)
 $ErrorActionPreference = 'Stop'
 
 $here = $PSScriptRoot
@@ -33,7 +36,7 @@ if (!(Test-Path -LiteralPath $game -PathType Leaf)) {
 }
 
 # codec-d/cool_fox's launcher profile ("pareto-residency", RTX-tested), the
-# three settings that took a GTX 1660 6 GB from ~280 to ~100 ms a frame
+# settings that took a GTX 1660 6 GB from ~280 to ~100 ms a frame
 # (Impre-visible/victory-gtx1660), sized for 12 GB here, and caps for 16 GB.
 $settings = [ordered]@{
     # cool_fox profile
@@ -56,29 +59,36 @@ $settings = [ordered]@{
     VICTORY_UPLOAD_AHEAD        = '1'
     VICTORY_CARD_BUFFERS_MIN_KB = '64'
     # victory-gtx1660: buffer copies and memory windows in the card's memory
-    # instead of the PC's, texture copies started levels down (2 on 12 GB;
-    # 3 is faster and softer), textures not made level by level
+    # instead of the PC's (windows 1536 MB: its advice for 8 GB or more, and
+    # 768 MB less of the PC's 16 GB), texture copies started a level down
+    # (2; 3 is softer and saved no time here: textures cost ~1 ms a frame),
+    # textures not made level by level
     VICTORY_CARD_BUFFERS_MB     = '1024'
-    VICTORY_CARD_WINDOWS_MB     = '768'
+    VICTORY_CARD_WINDOWS_MB     = '1536'
     VICTORY_TEXTURE_MIP_DROP    = '2'
     VICTORY_LEVELS_ON_DEMAND    = '0'
     # 16 GB of RAM: loose copies of title windows capped while RAM is short
     VICTORY_WINDOW_BUDGET_MB    = '1024'
-    # the frame statistics line (fps, ms/frame) in the log
+    # the frame statistics line (fps, ms/frame) and the memory line in the log
     VICTORY_LOG                 = 'info'
+    # for the next fixes, into the log: the shaders that do not translate
+    # and what the title gives the pipeline methods 0x1c8 and 0x218 (base64,
+    # a few hundred KB once), and why a wave64 program keeps 64 lanes
+    VICTORY_BLOBS_LOG           = '1'
+    VICTORY_WAVE_WHY            = '1'
 }
 if ($Safe) {
     foreach ($k in 'VICTORY_THIN', 'VICTORY_JOIN_PARTS', 'VICTORY_UPLOAD_AHEAD') {
         $settings.Remove($k)
     }
 }
-if ($SeriesX -and !$Safe) {
-    # avatarmanz/VIctory-7900XTX renderer ports 1 and 2 (byte-checked
-    # against this executable; made on Series X): the title's 32-bit
-    # graphics heap used in place, and its descriptor stores marking their
-    # slots
+if ($Turbo -and !$Safe) {
+    # avatarmanz/VIctory-7900XTX renderer ports (byte-checked against this
+    # executable; 45 ms a frame on Series S there with 5 as well)
     $settings['VICTORY_PORT_CONSTANTS'] = '1'
     $settings['VICTORY_PORT_DESCRIPTORS'] = '1'
+    $settings['VICTORY_PORT_GUARD'] = '1'
+    $settings['VICTORY_PORT_JOURNAL'] = '1'
 }
 foreach ($k in $settings.Keys) {
     if (!(Test-Path "Env:$k")) { Set-Item "Env:$k" $settings[$k] }
@@ -86,16 +96,19 @@ foreach ($k in $settings.Keys) {
 if (!$env:VICTORY_DATA_DIR) { $env:VICTORY_DATA_DIR = Join-Path $here 'state' }
 if (!$env:VICTORY_CACHE_DIR) { $env:VICTORY_CACHE_DIR = Join-Path $here 'cache-coolfox' }
 $console = if ($SeriesX) { 'series-x' } else { 'series-s' }
+$mode = @($console)
+if ($Turbo -and !$Safe) { $mode += 'turbo' }
+if ($Safe) { $mode += 'safe' }
 
 $logs = Join-Path $here 'logs'
 [IO.Directory]::CreateDirectory($logs) | Out-Null
-$log = Join-Path $logs ('run-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.log')
+$log = Join-Path $logs ('run-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + ($mode -join '-') + '.log')
 [IO.File]::WriteAllText((Join-Path $logs 'latest.txt'), $log)
-$header = @("Runtime $runtime", "Game $game", "console $console", "safe $([bool]$Safe)")
+$header = @("Runtime $runtime", "Game $game", "console $console", "mode $($mode -join ', ')")
 $header += Get-ChildItem Env:VICTORY_* | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Value)" }
 [IO.File]::WriteAllLines($log, [string[]]$header)
 
-Write-Host "Starting the game ($console$(if ($Safe) { ', safe' })). The first start translates shaders and takes long."
+Write-Host "Starting the game ($($mode -join ', ')). The first start translates shaders and takes long."
 Write-Host "Log: $log"
 # Through cmd: the runtime's output goes to the log as it writes it, in one
 # file, without PowerShell rewrapping its lines.

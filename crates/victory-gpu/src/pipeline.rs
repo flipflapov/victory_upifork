@@ -180,12 +180,17 @@ impl Shader {
                         samplers = t.host.samplers.len(),
                         "shader translated"
                     ),
-                    Err(e) => tracing::warn!(
-                        stage = self.stage,
-                        hash = %self.hash,
-                        error = %e,
-                        "shader does not translate; its pipelines' draws are dropped"
-                    ),
+                    Err(e) => {
+                        tracing::warn!(
+                            stage = self.stage,
+                            hash = %self.hash,
+                            error = %e,
+                            "shader does not translate; its pipelines' draws are dropped"
+                        );
+                        // (`VICTORY_BLOBS_LOG=1`: its container into the log, to
+                        // work on the translator's gap offline)
+                        crate::blobs::log(&format!("shader-{}-{}.cdxil", self.stage, self.hash), &self.container);
+                    }
                 }
                 done.ok()
             })

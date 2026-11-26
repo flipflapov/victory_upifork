@@ -515,6 +515,45 @@ pub(crate) fn ram_sample() -> Option<(u64, u64, u64, u64, u64, u64)> {
     ))
 }
 
+/// Every 10 s, in every build: the process's memory and the PC's, to see
+/// whether a PC with little RAM pages (a working set well below what the
+/// process committed, little RAM free and many page faults a second: the
+/// title's and our touches of memory then wait for the disk).
+#[cfg(windows)]
+fn memory_line() {
+    use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    static LAST: std::sync::Mutex<Option<(std::time::Instant, u32)>> = std::sync::Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if last.is_some_and(|(at, _)| at.elapsed() < std::time::Duration::from_secs(10)) {
+        return;
+    }
+    let mut c = PROCESS_MEMORY_COUNTERS { cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32, ..Default::default() };
+    let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    // SAFETY: our own process and sized structures the calls fill in.
+    if unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) } == 0 || unsafe { GlobalMemoryStatusEx(&mut m) } == 0 {
+        return;
+    }
+    let now = std::time::Instant::now();
+    let faults = last.map(|(at, before)| f64::from(c.PageFaultCount.wrapping_sub(before)) / now.duration_since(at).as_secs_f64());
+    *last = Some((now, c.PageFaultCount));
+    let mb = |b: u64| b >> 20;
+    tracing::info!(
+        "memory: the process {} MB in RAM of {} MB committed (peak in RAM {} MB), {} page faults a second; \
+         the PC {} of {} MB of RAM free ({}% in use), {} MB left to commit",
+        mb(c.WorkingSetSize as u64),
+        mb(c.PagefileUsage as u64),
+        mb(c.PeakWorkingSetSize as u64),
+        faults.map_or("?".to_owned(), |f| format!("{f:.0}")),
+        mb(m.ullAvailPhys),
+        mb(m.ullTotalPhys),
+        m.dwMemoryLoad,
+        mb(m.ullAvailPageFile)
+    );
+}
+
 /// How many references are held on a host object (its COM count): ours
 /// all, since the host's views and commands hold none. A buffer or texture
 /// with one is held by its owner alone: no descriptor slot keeps it
@@ -9256,6 +9295,7 @@ impl Meter {
         if elapsed < std::time::Duration::from_secs(1) {
             return;
         }
+        memory_line();
         let drawn = crate::draw::drawn();
         let frames = f64::from(self.frames);
         let fps = frames / elapsed.as_secs_f64();

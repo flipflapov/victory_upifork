@@ -17,6 +17,8 @@
 
 #[cfg(windows)]
 mod ambient;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod blobs;
 #[cfg(windows)]
 mod lightprobe;
 #[cfg(windows)]

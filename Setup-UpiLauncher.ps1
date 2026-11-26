@@ -186,13 +186,16 @@ try {
 
 # The shortcuts, in the Start menu and on the desktop: the title as a
 # Series S (this fork's default: less memory, the title's lower settings),
-# as a Series X, and safe (no renderer ports or newest threading). Earlier
+# the same with the renderer ports 1, 2, 6 and 7 (turbo), as a Series X, and
+# safe (no renderer ports or newest threading). Earlier
 # installs' shortcuts go, the ray tracing one too (it is for Radeon cards).
 $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 if (!(Test-Path -LiteralPath $powershell -PathType Leaf)) { $powershell = 'powershell.exe' }
 $script = Join-Path $InstallDir 'UPI-Launcher.ps1'
 # " (safe)" in Russian, from code points as the name is.
 $safe = ' (' + (-join [char[]](0x0431, 0x0435, 0x0437, 0x043E, 0x043F, 0x0430, 0x0441, 0x043D, 0x044B, 0x0439)) + ')'
+# " (turbo)" in Russian, the same way.
+$turbo = ' (' + (-join [char[]](0x0442, 0x0443, 0x0440, 0x0431, 0x043E)) + ')'
 $desktop = [Environment]::GetFolderPath('Desktop')
 foreach ($stale in 'DexNom Runtime.lnk', 'DexNom Runtime (Experimental RT).lnk', "$AppName (Series S).lnk") {
     foreach ($folder in $ShortcutDirectory, $desktop) {
@@ -205,6 +208,7 @@ foreach ($folder in $ShortcutDirectory, $desktop) {
     [IO.Directory]::CreateDirectory($folder) | Out-Null
     foreach ($entry in @(
         @{ Name = $AppName; Switch = '' }
+        @{ Name = "$AppName$turbo"; Switch = ' -Turbo' }
         @{ Name = "$AppName (Series X)"; Switch = ' -SeriesX' }
         @{ Name = "$AppName$safe"; Switch = ' -Safe' }
     )) {

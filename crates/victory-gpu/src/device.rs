@@ -395,8 +395,56 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
             first_points_at = format_args!("{first:x?}"),
             "a pipeline creation method that is not implemented: the title goes without this pipeline"
         );
+        #[cfg(windows)]
+        if calls <= 2 {
+            unknown_pipeline_blobs(SLOT, calls, desc as usize);
+        }
     }
     E_NOTIMPL
+}
+
+/// With `VICTORY_BLOBS_LOG=1` ([`crate::blobs`]): what an unknown pipeline
+/// method's description holds, for writing the method: its first 256 bytes,
+/// the bytes of each of its (address, length) word pairs that read (up to
+/// 1 MiB each: what looks like shader code and its metadata), and what its
+/// first word points at: entries of six words, the third a length and the
+/// fourth an address (shader containers, by their sizes), up to eight.
+#[cfg(windows)]
+fn unknown_pipeline_blobs(slot: usize, call: u32, desc: usize) {
+    if !crate::blobs::on() || desc == 0 {
+        return;
+    }
+    let read = |at: u64, len: u64| -> Option<Vec<u8>> {
+        // (the length checked before anything is made of it: most word
+        // pairs are not an address and a length)
+        if !(0x10000..0x7fff_ffff_0000).contains(&at) || !(1..=1 << 20).contains(&len) {
+            return None;
+        }
+        let mut bytes = vec![0u8; len as usize];
+        crate::host::read_into(at as *const u8, &mut bytes).then_some(bytes)
+    };
+    let words = |bytes: &[u8]| -> Vec<u64> {
+        bytes.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect()
+    };
+    let stem = format!("pipe-{slot:#x}-{call}");
+    let Some(head) = read(desc as u64, 256).or_else(|| read(desc as u64, 128)) else { return };
+    crate::blobs::log(&format!("{stem}-description.bin"), &head);
+    let w = words(&head);
+    for i in 1..w.len() - 1 {
+        if let Some(bytes) = read(w[i], w[i + 1]) {
+            crate::blobs::log(&format!("{stem}-w{i}-{:#x}.bin", w[i + 1]), &bytes);
+        }
+    }
+    let Some(list) = read(w[0], 8 * 6 * 8).or_else(|| read(w[0], 8 * 6 * 2)) else { return };
+    let entries = words(&list);
+    for (e, entry) in entries.chunks(6).enumerate() {
+        if entry[0] != entries[0] {
+            break;
+        }
+        if let Some(bytes) = read(entry[3], entry[2]) {
+            crate::blobs::log(&format!("{stem}-entry{e}-{:016x}.bin", entry[5]), &bytes);
+        }
+    }
 }
 
 /// The host device's state: the console's device is removed when the host's is

@@ -315,10 +315,16 @@ pub(crate) fn missed(index: u32, handle: u64, view: bool, tabled: bool) {
     MISSED_ALL.fetch_add(1, Relaxed);
     let rip = a.writers.get(((handle - a.start) >> 16) as usize).map_or(0, |w| w.load(Relaxed));
     let (base, size) = (IMAGE[0].load(Relaxed), IMAGE[1].load(Relaxed));
-    let writer = if rip >= base && rip < base + size { format!("title+{:#x}", rip - base) } else if rip != 0 { format!("{rip:#x} (not the title's)") } else { "not known (no fault on its block)".into() };
-    {
+    let title = rip >= base && rip < base + size;
+    let writer = if title { format!("title+{:#x}", rip - base) } else if rip != 0 { format!("{rip:#x} (not the title's)") } else { "not known (no fault on its block)".into() };
+    let first = {
         let mut by = WRITERS.lock().unwrap_or_else(|e| e.into_inner());
-        *by.entry(writer.clone()).or_default() += 1;
+        let count = by.entry(writer.clone()).or_default();
+        *count += 1;
+        *count == 1
+    };
+    if first && rip != 0 {
+        writer_seen(rip, title.then_some(base), &writer);
     }
     if n < 20 || n.is_power_of_two() {
         tracing::warn!(
@@ -328,6 +334,63 @@ pub(crate) fn missed(index: u32, handle: u64, view: bool, tabled: bool) {
             "renderer port 2: a view record in the title's heap that no store told of (found by the fallback; made now)"
         );
     }
+}
+
+/// Once a writer of missed records ([`missed`]): what it is, to patch it
+/// next. In the title: its code from 64 bytes before the place to 32 after
+/// (the place is where the guard's fault was, at the store or the first
+/// instruction of a string store); elsewhere: the module the place lies in
+/// and where in it (a host DLL's copy or fill the title called, or a stub
+/// of ours outside every module, such as `console_insn`'s replacement of a
+/// `clzero` loop).
+fn writer_seen(rip: usize, title_base: Option<usize>, writer: &str) {
+    if let Some(base) = title_base {
+        let at = rip.saturating_sub(64).max(base);
+        let mut code = vec![0u8; rip + 32 - at];
+        let read = crate::host::read_into(at as *const u8, &mut code);
+        let hex: String = code.iter().map(|b| format!("{b:02x}")).collect();
+        tracing::info!(
+            %writer,
+            from = format_args!("title+{:#x}", at - base),
+            code = if read { hex.as_str() } else { "unreadable" },
+            "renderer port 2: a writer of view records no store told of, its code (the place at byte {})",
+            rip - at
+        );
+        return;
+    }
+    use windows_sys::Win32::System::LibraryLoader::{
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleFileNameW, GetModuleHandleExW,
+    };
+    let mut module = std::ptr::null_mut();
+    let mut path = [0u16; 260];
+    // SAFETY: an address, no name; plain queries.
+    let (file, offset) = unsafe {
+        let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+        if GetModuleHandleExW(flags, rip as *const u16, &mut module) == 0 {
+            ("no module (a stub of ours?)".to_owned(), 0)
+        } else {
+            let len = GetModuleFileNameW(module, path.as_mut_ptr(), path.len() as u32) as usize;
+            let path = String::from_utf16_lossy(&path[..len]);
+            (path.rsplit('\\').next().unwrap_or("?").to_owned(), rip - module as usize)
+        }
+    };
+    // (from 16 bytes before it; from it when that is not mapped, at the
+    // start of a stub page of ours)
+    let mut code = [0u8; 32];
+    let before = if crate::host::read_into(rip.saturating_sub(16) as *const u8, &mut code) {
+        Some(16)
+    } else {
+        crate::host::read_into(rip as *const u8, &mut code).then_some(0)
+    };
+    let hex: String = code.iter().map(|b| format!("{b:02x}")).collect();
+    tracing::info!(
+        %writer,
+        module = %file,
+        offset = format_args!("{offset:#x}"),
+        code = if before.is_some() { hex.as_str() } else { "unreadable" },
+        "renderer port 2: a writer of view records no store told of, outside the title (the place at byte {} of the code)",
+        before.unwrap_or(0)
+    );
 }
 
 /// The runtime's own `memcpy` and `memmove` ([`import`]).
