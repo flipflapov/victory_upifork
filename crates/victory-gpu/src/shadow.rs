@@ -2907,10 +2907,10 @@ pub(crate) fn windows() -> [u64; 3] {
 /// list or a pass over the heap holds and their bytes; the windows asked
 /// for without a length (root views, which keep the 4 MiB grid) and their
 /// bytes; and the window grid in bytes ([`window`]).
-#[cfg(feature = "diagnostics")]
+// (also the memory line of every build, `crate::host`)
 pub(crate) fn window_use() -> [u64; 8] {
     let mut out = [0u64; 8];
-    let loose = LOOSE.write().unwrap_or_else(|e| e.into_inner());
+    let loose = LOOSE.read().unwrap_or_else(|e| e.into_inner());
     for s in loose.values() {
         let copied = s.copied.lock().unwrap_or_else(|e| e.into_inner());
         let pages = copied.iter().filter(|&&at| at != 0).count() as u64;

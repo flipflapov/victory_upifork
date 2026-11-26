@@ -558,6 +558,20 @@ fn memory_line() {
     let alive: Vec<u64> = ALIVE.iter().map(|a| a.load(Ordering::Relaxed)).collect();
     let lists: Vec<u64> = LISTS.iter().map(|l| l.load(Ordering::Relaxed)).collect();
     let kept = crate::pipeline::kept();
+    // What keeps the windows' copies (`shadow::let_go_idle` lets go only of
+    // those nothing holds): their pages copied, those whose host buffer
+    // something else holds too (a descriptor slot that views it, a list),
+    // those whose copy something else holds (a list, a pass, a submission).
+    let windows = crate::shadow::window_use();
+    tracing::info!(
+        "memory, windows outside buffers: {} MB of pages copied; {} of them {} MB with their buffer held elsewhere too (a slot \
+         that views it, a list), {} {} MB with their copy held elsewhere too (a list, a pass, a submission)",
+        mb(windows[0]),
+        windows[1],
+        mb(windows[2]),
+        windows[3],
+        mb(windows[4])
+    );
     tracing::info!(
         "memory, ours: host copies of title memory {} MB ({} alive, in the PC's or the card's; windows outside buffers {} MB), snapshot \
          buffers kept {} MB; texture staging {} MB; blocks of textures {} MB, of their staging {} MB; lists' scratch {} MB, \
