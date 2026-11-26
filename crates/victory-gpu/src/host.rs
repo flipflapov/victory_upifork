@@ -540,9 +540,49 @@ fn memory_line() {
     let faults = last.map(|(at, before)| f64::from(c.PageFaultCount.wrapping_sub(before)) / now.duration_since(at).as_secs_f64());
     *last = Some((now, c.PageFaultCount));
     let mb = |b: u64| b >> 20;
+    // The card's own memory, and the PC's that the card's objects hold
+    // (upload, read-back and shared buffers: part of what is committed).
+    let card = host().and_then(Host::video_memory_groups).map_or("?".to_owned(), |[own, shared]| {
+        format!("the card's own {} of {} MB, the PC's held by the card's objects {} MB", mb(own[1]), mb(own[0]), mb(shared[1]))
+    });
+    // What of it is ours, by kind (alive now): host copies of title memory
+    // (the PC's shared buffers and the card's alike), of them the windows outside buffers, and the
+    // snapshot buffers kept for reuse; texture staging; blocks of textures
+    // (the card's) and of their staging (the PC's); the lists' scratch in
+    // upload memory, alive, kept spare, and their other upload buffers;
+    // host lists alive and those never reset; copies in the card's memory;
+    // what the shader table and the pipeline library keep.
+    let copies = crate::shadow::memory();
+    let staged = crate::texture::memory();
+    let blocks = crate::pool::memory();
+    let alive: Vec<u64> = ALIVE.iter().map(|a| a.load(Ordering::Relaxed)).collect();
+    let lists: Vec<u64> = LISTS.iter().map(|l| l.load(Ordering::Relaxed)).collect();
+    let kept = crate::pipeline::kept();
+    tracing::info!(
+        "memory, ours: host copies of title memory {} MB ({} alive, in the PC's or the card's; windows outside buffers {} MB), snapshot \
+         buffers kept {} MB; texture staging {} MB; blocks of textures {} MB, of their staging {} MB; lists' scratch {} MB, \
+         spare {} MB, their other uploads {} MB; host lists {} alive, {} never reset; copies in the card's memory {} MB; \
+         shader containers {} MB, translations {} MB, the pipeline library's file {} MB",
+        mb(copies[1]),
+        copies[0],
+        mb(copies[3]),
+        mb(copies[5]),
+        mb(staged[1]),
+        blocks[0],
+        blocks[1],
+        mb(alive[2]),
+        mb(alive[4]),
+        mb(alive[7]),
+        alive[0],
+        lists[3],
+        mb(crate::shadow::live_span_bytes()),
+        mb(kept[1]),
+        mb(kept[3]),
+        mb(kept[4])
+    );
     tracing::info!(
         "memory: the process {} MB in RAM of {} MB committed (peak in RAM {} MB), {} page faults a second; \
-         the PC {} of {} MB of RAM free ({}% in use), {} MB left to commit",
+         the PC {} of {} MB of RAM free ({}% in use), {} MB left to commit; video memory in use: {card}",
         mb(c.WorkingSetSize as u64),
         mb(c.PagefileUsage as u64),
         mb(c.PeakWorkingSetSize as u64),

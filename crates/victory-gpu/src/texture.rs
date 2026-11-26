@@ -489,7 +489,7 @@ impl Drop for Staging {
 
 /// For the memory line: staging buffers alive, their bytes, and how many
 /// of them their texture still has (the others wait for a list's reset).
-#[cfg(feature = "diagnostics")]
+// (also the memory line of every build, `crate::host`)
 pub(crate) fn memory() -> [u64; 3] {
     use std::sync::atomic::Ordering::Relaxed;
     let kept = STAGING

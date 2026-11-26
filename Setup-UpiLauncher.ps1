@@ -186,7 +186,7 @@ try {
 
 # The shortcuts, in the Start menu and on the desktop: the title as a
 # Series S (this fork's default: less memory, the title's lower settings),
-# the same with the renderer ports 1, 2, 6 and 7 (turbo), as a Series X, and
+# the same with the renderer ports 1, 2 and 6 (turbo), as a Series X, and
 # safe (no renderer ports or newest threading). Earlier
 # installs' shortcuts go, the ray tracing one too (it is for Radeon cards).
 $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
