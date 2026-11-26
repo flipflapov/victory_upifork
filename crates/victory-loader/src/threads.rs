@@ -7,27 +7,10 @@
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::{DLL_PROCESS_DETACH, LoadedImage};
-
-pub(crate) fn thread_name(thread: windows_sys::Win32::Foundation::HANDLE) -> String {
-    use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::System::Threading::GetThreadDescription;
-
-    let mut name = std::ptr::null_mut();
-    // SAFETY: the system allocates the UTF-16 string; we free it with LocalFree.
-    unsafe {
-        if GetThreadDescription(thread, &mut name) < 0 || name.is_null() {
-            return String::new();
-        }
-        let len = (0..).take_while(|&i| *name.add(i) != 0).count();
-        let text = String::from_utf16_lossy(std::slice::from_raw_parts(name, len));
-        LocalFree(name.cast::<c_void>());
-        text
-    }
-}
 
 const DLL_THREAD_ATTACH: u32 = 2;
 const DLL_THREAD_DETACH: u32 = 3;
@@ -95,6 +78,13 @@ static EXITING: AtomicBool = AtomicBool::new(false);
 /// (a thread ended while holding a lock their detach code wants).
 const DETACH_DEADLINE: Duration = Duration::from_secs(5);
 
+static BEFORE_THREAD_SHUTDOWN: OnceLock<fn()> = OnceLock::new();
+
+/// Runs the title runner's final save while worker threads can still release locks.
+pub fn set_before_thread_shutdown(save: fn()) {
+    let _ = BEFORE_THREAD_SHUTDOWN.set(save);
+}
+
 /// Process exit (the CRT's `exit`, which titles call), in `ExitProcess`'s
 /// order: the title's exit functions have run; every other thread ends
 /// (title threads and ours); every attached image gets
@@ -144,6 +134,11 @@ extern "C" fn detach_all() {
             id => break id,
         }
     };
+    // A stalled save is covered by the same deadline as detach. A worker
+    // already saving must be able to finish before we end the other threads.
+    if let Some(save) = BEFORE_THREAD_SHUTDOWN.get() {
+        save();
+    }
     end_other_threads(&[watchdog]);
     for image in dlls.iter().chain(&exes) {
         // SAFETY: attached images are bound. A non-null third argument

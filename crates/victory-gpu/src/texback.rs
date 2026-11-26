@@ -8,8 +8,8 @@
 //! the title read those two kinds), and boats sank.
 //!
 //! For textures of the kinds in `VICTORY_TEXTURE_BACK` (comma-separated
-//! `<width>x<height>f<format>`; `0` for none; by default the kinds the read
-//! watch found the title reading), a list in which shaders write one copies it
+//! `<width>x<height>f<format>`; unset or `1`: the four water formats found by
+//! the upstream trace; `0`: none), a list in which shaders write one copies it
 //! into a read-back buffer of ours when it closes, and once the list has run
 //! the texels are tiled into the texture's title memory in the console's
 //! layout, as the console's GPU would have left them.
@@ -19,7 +19,8 @@
 //! what the list's last write left; a title read in between sees the frame
 //! before, as it would before the console's GPU has run.
 
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use windows::Win32::Graphics::Direct3D12::*;
 
@@ -30,7 +31,10 @@ fn kinds() -> &'static [(u64, u32, u32)] {
     static KINDS: OnceLock<Vec<(u64, u32, u32)>> = OnceLock::new();
     KINDS.get_or_init(|| {
         const DEFAULT: &str = "256x256f41,256x256f16,64x64f16,128x128f36";
-        let list = std::env::var("VICTORY_TEXTURE_BACK").unwrap_or_else(|_| DEFAULT.to_owned());
+        let list = match std::env::var("VICTORY_TEXTURE_BACK").as_deref() {
+            Ok("1") | Err(_) => DEFAULT.to_owned(),
+            Ok(spec) => spec.to_owned(),
+        };
         let kinds: Vec<(u64, u32, u32)> = list
             .split(',')
             .filter_map(|k| {
@@ -53,71 +57,100 @@ pub(crate) fn wanted(resource: This) -> bool {
         && crate::resource::texture_kind(resource).is_some_and(|k| kinds.contains(&k))
 }
 
-/// A texture's copy into a read-back buffer, recorded into a list, and where
-/// its texels go once the list has run.
+/// An outstanding write to a specific allocation. Mapping and resource
+/// changes invalidate only the writes that could touch the replaced memory.
+struct Ticket {
+    owner: usize,
+    at: usize,
+    end: usize,
+    valid: AtomicBool,
+}
+
+static TICKETS: Mutex<Vec<Weak<Ticket>>> = Mutex::new(Vec::new());
+static TRACKING: AtomicBool = AtomicBool::new(false);
+
+fn track(owner: usize, at: usize, end: usize) -> Arc<Ticket> {
+    let ticket = Arc::new(Ticket { owner, at, end, valid: AtomicBool::new(true) });
+    let mut tickets = TICKETS.lock().unwrap_or_else(|e| e.into_inner());
+    tickets.retain(|weak| weak.strong_count() != 0);
+    tickets.push(Arc::downgrade(&ticket));
+    TRACKING.store(true, Ordering::Relaxed);
+    ticket
+}
+
+fn invalidate(matches: impl Fn(&Ticket) -> bool) {
+    if !TRACKING.load(Ordering::Relaxed) {
+        return;
+    }
+    TICKETS.lock().unwrap_or_else(|e| e.into_inner()).retain(|weak| {
+        let Some(ticket) = weak.upgrade() else { return false };
+        if matches(&ticket) {
+            ticket.valid.store(false, Ordering::Release);
+        }
+        true
+    });
+}
+
+pub(crate) fn released(owner: usize) {
+    invalidate(|ticket| ticket.owner == owner);
+}
+
+pub(crate) fn replaced(at: usize) {
+    invalidate(|ticket| ticket.at == at);
+}
+
+pub(crate) fn remapped(at: usize, len: usize) {
+    let end = at.saturating_add(len);
+    invalidate(|ticket| at < ticket.end && ticket.at < end);
+}
+
+pub(crate) struct Target {
+    pub(crate) copy: Arc<crate::resource::HostTexture>,
+    layout: victory_formats::texture::Layout,
+    ticket: Arc<Ticket>,
+}
+
+impl Target {
+    pub(crate) fn new(resource: This) -> Option<Self> {
+        // Keep the host copy independently of the title's resource lifetime.
+        let copy = crate::resource::host_copy(resource)?;
+        let _mapping = crate::watch::title_memory_reading();
+        let (layout, at, size) = crate::resource::title_texture(resource)?;
+        let end = at.checked_add(size).filter(|&end| at != 0 && end > at)?;
+        let ticket = track(resource as usize, at, end);
+        Some(Self { copy, layout, ticket })
+    }
+
+    pub(crate) fn owner(&self) -> usize { self.ticket.owner }
+}
+
+/// The readback resources and the allocation the pixels belong to.
 pub(crate) struct Back {
-    // Own the guest memory through every execution of the closed command list.
-    _resource: crate::resource::ResourceRef,
-    mapping: crate::inplace::ReadbackMapping,
     buffer: ID3D12Resource,
-    buffer_bytes: usize,
     footprints: Vec<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>,
     rows: Vec<u32>,
     mips: u32,
     layout: victory_formats::texture::Layout,
-    /// The texture's title memory and its layout's bytes.
-    at: usize,
-    size: usize,
-    /// Width, height, format (for the log).
-    kind: Option<(u64, u32, u32)>,
-}
-
-fn subresource_count(desc: &D3D12_RESOURCE_DESC) -> u32 {
-    let slices = if desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D {
-        1
-    } else {
-        u32::from(desc.DepthOrArraySize)
-    };
-    u32::from(desc.MipLevels) * slices
+    ticket: Arc<Ticket>,
 }
 
 impl Back {
-    pub(crate) fn destination(&self) -> (usize, usize) {
-        (self.at, self.at + self.size)
+    pub(crate) fn range(&self) -> (usize, usize) {
+        (self.ticket.at, self.ticket.end)
     }
 }
 
-/// Expand a submission's intervals through currently mapped title aliases,
-/// after releasing each list lock. CPU preparation may use any such view.
-pub(crate) fn add_destination_aliases(ranges: &mut Vec<(usize, usize)>) {
-    const PAGE: usize = 64 << 10;
-    for index in 0..ranges.len() {
-        let (at, end) = ranges[index];
-        let mut page = at & !(PAGE - 1);
-        while page < end {
-            let lo = at.saturating_sub(page);
-            let hi = (end - page).min(PAGE);
-            for alias in crate::inplace::pages_of(page) {
-                if alias != page {
-                    ranges.push((alias + lo, alias + hi));
-                }
-            }
-            page = page.saturating_add(PAGE);
-        }
+/// Records a host copy from a texture already in COPY_SOURCE.
+pub(crate) fn record(list: &ID3D12GraphicsCommandList, target: Target) -> Option<Back> {
+    if !target.ticket.valid.load(Ordering::Acquire) {
+        return None;
     }
-}
-
-/// Records into `list` the copy of `texture` (title resource `resource`'s
-/// host copy, in the copy-source state) into a read-back buffer.
-pub(crate) fn record(list: &ID3D12GraphicsCommandList, retained: crate::resource::ResourceRef, texture: &ID3D12Resource) -> Option<Back> {
     let host = crate::host::host()?;
-    let resource = retained.as_ptr();
-    let (layout, at, size) = crate::resource::title_texture(resource)?;
-    at.checked_add(size)?;
-    // SAFETY: a live texture.
+    let texture = &target.copy.texture;
+    // SAFETY: a live texture kept through the command list's state tracking.
     let desc = unsafe { texture.GetDesc() };
-    let mips = u32::from(desc.MipLevels);
-    let subresources = subresource_count(&desc);
+    let mips = u32::from(desc.MipLevels.max(1));
+    let subresources = mips * u32::from(desc.DepthOrArraySize.max(1));
     let n = subresources as usize;
     let mut footprints = vec![D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default(); n];
     let mut rows = vec![0u32; n];
@@ -135,11 +168,15 @@ pub(crate) fn record(list: &ID3D12GraphicsCommandList, retained: crate::resource
             Some(&mut total),
         )
     };
-    let buffer_bytes = usize::try_from(total).ok()?;
-    if buffer_bytes == 0 || buffer_bytes > isize::MAX as usize || at == 0 || size == 0 {
-        return None;
+    // The last footprint's advertised extent can omit row-end padding.
+    // The tiler reads a pitched slice, so the mapped buffer must include it.
+    for (footprint, &rows) in footprints.iter().zip(&rows) {
+        let format = footprint.Footprint;
+        let pitched = u64::from(format.RowPitch)
+            .checked_mul(u64::from(rows))?
+            .checked_mul(u64::from(format.Depth))?;
+        total = total.max(footprint.Offset.checked_add(pitched)?);
     }
-    let mapping = crate::inplace::ReadbackMapping::record(at, size)?;
     let buffer = host.read_back_buffer(total)?;
     for (i, footprint) in footprints.iter().enumerate() {
         let to = D3D12_TEXTURE_COPY_LOCATION {
@@ -157,21 +194,29 @@ pub(crate) fn record(list: &ID3D12GraphicsCommandList, retained: crate::resource
         // SAFETY: an open list; the texture is in the copy-source state.
         unsafe { list.CopyTextureRegion(&to, 0, 0, 0, &from, None) };
     }
-    COPIED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let kind = crate::resource::texture_kind(resource);
-    Some(Back { _resource: retained, mapping, buffer, buffer_bytes, footprints, rows, mips, layout, at, size, kind })
+    Some(Back { buffer, footprints, rows, mips, layout: target.layout, ticket: target.ticket })
 }
 
-/// Textures copied back since the start.
-pub(crate) static COPIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Once the list that recorded `back` has run: its texels, tiled into the
-/// title's layout, into the texture's title memory.
+/// Once the list has run, tile its texels back into the same title allocation.
 pub(crate) fn land(back: &Back) {
-    let Some(_mapping) = back.mapping.for_write() else { return };
-    let mut tiled = vec![0u8; back.size];
-    // Bytes of title memory the subresources do not cover stay as they are.
-    crate::host::copy_mapped(tiled.as_mut_ptr(), back.at as *const u8, back.size, false);
+    static COPIED: AtomicU64 = AtomicU64::new(0);
+    static STALE: AtomicU64 = AtomicU64::new(0);
+    let _mapping = crate::watch::title_memory_reading();
+    let _ticket_guard = TICKETS.lock().unwrap_or_else(|e| e.into_inner());
+    if !back.ticket.valid.load(Ordering::Acquire) {
+        let skipped = STALE.fetch_add(1, Ordering::Relaxed) + 1;
+        if skipped.is_power_of_two() {
+            tracing::info!(skipped, "skipping texture readbacks whose title allocation changed");
+        }
+        return;
+    }
+    let (at, end) = back.range();
+    let size = end - at;
+    let mut tiled = vec![0u8; size];
+    // Keep title bytes the subresources do not cover.
+    if !crate::host::read_into(at as *const u8, &mut tiled) {
+        return;
+    }
     let mut data = std::ptr::null_mut();
     // SAFETY: our read-back buffer, written by the list that has run.
     unsafe {
@@ -179,31 +224,16 @@ pub(crate) fn land(back: &Back) {
             return;
         }
     }
-    // GetCopyableFootprints omits the final row's trailing padding.
-    // SAFETY: Map succeeded and the buffer was created with exactly this width.
-    let mapped = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), back.buffer_bytes) };
     for (i, (footprint, &rows)) in back.footprints.iter().zip(&back.rows).enumerate() {
         let (mip, slice) = (i as u32 % back.mips, i as u32 / back.mips);
         let f = footprint.Footprint;
         let pitch = f.RowPitch as usize;
-        // A slice ends where the next footprint begins, or at the actual buffer end.
-        let end = back.footprints.get(i + 1).map_or(mapped.len(), |next| next.Offset as usize);
-        let linear = &mapped[footprint.Offset as usize..end];
+        let len = pitch * rows as usize * f.Depth as usize;
+        // SAFETY: the subresource's part of the mapped buffer.
+        let linear = unsafe { std::slice::from_raw_parts(data.cast::<u8>().add(footprint.Offset as usize), len) };
         if let Err(e) = back.layout.tile(&mut tiled, mip, slice, linear, pitch, pitch * rows as usize) {
-            static SEEN: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
-            let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
-            if !seen.contains(&back.at) {
-                seen.push(back.at);
-                tracing::warn!(
-                    ?e,
-                    mip,
-                    slice,
-                    kind = ?back.kind,
-                    at = format_args!("{:#x}", back.at),
-                    desc = ?back.layout.desc,
-                    "a texture copied back could not be tiled (logged once per texture)"
-                );
-            }
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| tracing::warn!(?e, mip, slice, "a texture copied back could not be tiled"));
             // SAFETY: mapped above.
             unsafe { back.buffer.Unmap(0, None) };
             return;
@@ -211,49 +241,33 @@ pub(crate) fn land(back: &Back) {
     }
     // SAFETY: mapped above.
     unsafe { back.buffer.Unmap(0, None) };
-    crate::host::copy_mapped(back.at as *mut u8, tiled.as_ptr(), back.size, true);
-    #[cfg(feature = "diagnostics")]
-    verify_first_landing(back, &tiled);
+    crate::host::copy_mapped(at as *mut u8, tiled.as_ptr(), size, true);
+    let copied = COPIED.fetch_add(1, Ordering::Relaxed) + 1;
+    if copied == 1 || copied.is_multiple_of(128) {
+        tracing::info!(copied, bytes = size, "texture readback landed");
+    }
 }
 
-#[cfg(feature = "diagnostics")]
-fn verify_first_landing(back: &Back, tiled: &[u8]) {
-    static SEEN: std::sync::Mutex<Vec<(u64, u32, u32)>> = std::sync::Mutex::new(Vec::new());
-    let Some(kind) = back.kind else { return };
-    {
-        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
-        if seen.contains(&kind) {
-            return;
-        }
-        seen.push(kind);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_readbacks_for_changed_allocations_are_invalidated() {
+        let first = track(91, 0x1000, 0x2000);
+        let next = track(92, 0x2000, 0x3000);
+        let far = track(93, 0x4000, 0x5000);
+
+        remapped(0x0f00, 0x200);
+        assert!(!first.valid.load(Ordering::Acquire));
+        assert!(next.valid.load(Ordering::Acquire));
+        replaced(0x2000);
+        assert!(!next.valid.load(Ordering::Acquire));
+        assert!(far.valid.load(Ordering::Acquire));
+
+        released(93);
+        assert!(!far.valid.load(Ordering::Acquire));
+        assert!(track(94, 0x2000, 0x3000).valid.load(Ordering::Acquire));
     }
-    // Check the bytes in the title destination; copy_mapped also accepts sparse ranges.
-    let mut guest = vec![0; tiled.len()];
-    let complete = crate::host::read(back.at as *const u8, guest.as_mut_ptr(), guest.len());
-    let verified = complete && guest == tiled;
-    // Sample actual mip-zero texels, excluding alignment and mip padding.
-    let desc = back.layout.desc;
-    let (mut finite, mut nonzero, mut lo, mut hi) = (0usize, 0usize, f32::INFINITY, f32::NEG_INFINITY);
-    if verified && matches!(kind.2, 16 | 41) {
-        for gy in 0..5 {
-            for gx in 0..5 {
-                let (x, y) = ((desc.width - 1) * gx / 4, (desc.height - 1) * gy / 4);
-                let Ok(offset) = back.layout.offset(0, x, y, 0) else { continue };
-                let at = offset as usize;
-                let Some(texel) = guest.get(at..at + desc.element_bytes as usize) else { continue };
-                for bytes in texel.chunks_exact(4) {
-                    let value = f32::from_le_bytes(bytes.try_into().unwrap());
-                    if value.is_finite() {
-                        finite += 1;
-                        nonzero += usize::from(value != 0.0);
-                        lo = lo.min(value);
-                        hi = hi.max(value);
-                    }
-                }
-            }
-        }
-    }
-    let sample_range = (finite != 0).then_some((lo, hi));
-    tracing::info!(?kind, at = format_args!("{:#x}", back.at), resource = ?back._resource.as_ptr(),
-        bytes = tiled.len(), verified, finite, nonzero, ?sample_range, "first texture copy-back checked in title memory");
 }

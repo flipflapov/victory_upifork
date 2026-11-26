@@ -792,6 +792,9 @@ impl<'a> Lanes<'a> {
             .iter()
             .enumerate()
             .map(|(n, block)| {
+                // Reachability is fixed within the block. Vector instructions
+                // with the same EXEC therefore need the same guard.
+                let mut last_guard = None;
                 block
                     .insts
                     .iter()
@@ -801,8 +804,16 @@ impl<'a> Lanes<'a> {
                         | (_, Fields::Sop { .. } | Fields::Sopp { .. } | Fields::Smem { .. }) => {
                             None
                         }
-                        (&Some(e), _) if b.implies(cond[n], e) => None,
-                        (&Some(e), _) => Some(b.given(e, cond[n])),
+                        (&Some(e), _) => {
+                            if let Some((prev, guard)) = last_guard
+                                && prev == e
+                            {
+                                return guard;
+                            }
+                            let guard = (!b.implies(cond[n], e)).then(|| b.given(e, cond[n]));
+                            last_guard = Some((e, guard));
+                            guard
+                        }
                     })
                     .collect()
             })
@@ -897,17 +908,6 @@ impl<'a> Lanes<'a> {
         if let Some(&m) = self.other.get(&k) {
             return (m, false);
         }
-        // A scalar pair can be parked in two VGPR lanes and restored one
-        // dword at a time. The spill pass turns these into scalar moves.
-        // Recover the original lane predicate only when the two words
-        // still come from the same known mask, in their original order.
-        if self.p.wave64 {
-            let source = (self.move_source(k.0), self.move_source(k.1));
-            if source != k && let Some(&m) = self.masks.get(&source) {
-                self.masks.insert(k, m);
-                return (m, true);
-            }
-        }
         let p = self.p;
         let (m, derived) = match self.join(k) {
             Some(join) => join,
@@ -948,20 +948,6 @@ impl<'a> Lanes<'a> {
         };
         cache.insert(k, m);
         (m, derived)
-    }
-
-    fn move_source(&self, mut value: Value) -> Value {
-        while let Some(&(b, i)) = self.defs.get(&value) {
-            let inst = &self.p.blocks[b].insts[i];
-            let [(Reg::S(_), source)] = inst.reads.as_slice() else {
-                break;
-            };
-            if inst.name() != "s_mov_b32" {
-                break;
-            }
-            value = *source;
-        }
-        value
     }
 
     /// A mask joined by phis at a block entry, and whether a mask coming in
@@ -1603,6 +1589,37 @@ mod tests {
     }
 
     #[test]
+    fn guards_follow_exec_and_block_reachability() {
+        let p = build(
+            &[
+                0x7DA4_0080, // v_cmpx_eq_u32 exec, 0, v0
+                0x7E02_0280, // v_mov_b32 v1, 0
+                0x7E04_0280, // v_mov_b32 v2, 0
+                0xBF88_0005, // s_cbranch_execz -> end
+                0x7E06_0280, // v_mov_b32 v3, 0
+                0x7DA4_0880, // v_cmpx_eq_u32 exec, 0, v4
+                0x7E06_0280, // v_mov_b32 v3, 0
+                0xBE82_0480, // s_mov_b64 s[2:3], 0
+                0x7E0A_0280, // v_mov_b32 v5, 0
+                S_ENDPGM,
+            ],
+            true,
+        );
+        let s = structure(&p).unwrap();
+        let lane = |block: usize, i: usize| {
+            Atom::Lane(p.blocks[block].insts[i].write(Reg::S(EXEC)).unwrap())
+        };
+        let a = s.guards[0][1].unwrap();
+        let b = s.guards[1][2].unwrap();
+        assert_eq!(s.bools.node(a), Some((lane(0, 0), Bool::FALSE, Bool::TRUE)));
+        assert_eq!(s.guards[0], [None, Some(a), Some(a), None]);
+        // The fallthrough already implies the first compare. Only the second
+        // compare needs testing, and the scalar move never needs a guard.
+        assert_eq!(s.bools.node(b), Some((lane(1, 1), Bool::FALSE, Bool::TRUE)));
+        assert_eq!(s.guards[1], [None, None, Some(b), None, Some(b)]);
+    }
+
+    #[test]
     fn divergent_loop_exits_per_lane() {
         let p = build(
             &[
@@ -1712,32 +1729,6 @@ mod tests {
                 Some((Atom::Lane(lo), Bool::FALSE, Bool::TRUE)),
                 "{reader:#x}: vcc_hi was zeroed after the compare"
             );
-        }
-    }
-
-    #[test]
-    fn split_scalar_copies_across_a_branch_preserve_both_words_of_a_wave64_mask() {
-        for (high, intact) in [(0xBE83_036B, true), (0xBE83_036A, false)] {
-            let p = build(
-                &[
-                    0x7D84_0080, // v_cmp_eq_u32 vcc, 0, v0
-                    0xBE84_046A, // s_mov_b64 s[4:5], vcc
-                    0xBF06_0100, // s_cmp_eq_u32 s0, s1
-                    0xBF85_0004, // s_cbranch_scc1 -> join at 32
-                    0xBE82_036A, // s_mov_b32 s2, vcc_lo
-                    high,        // s_mov_b32 s3, vcc_hi (or vcc_lo)
-                    0xBE84_0302, // s_mov_b32 s4, s2
-                    0xBE85_0303, // s_mov_b32 s5, s3
-                    0xBEFE_0404, // s_mov_b64 exec, s[4:5]
-                    0x7E02_0280, // v_mov_b32 v1, 0
-                    S_ENDPGM,
-                ],
-                true,
-            );
-            let s = structure(&p).unwrap();
-            let compare = p.blocks[0].insts[0].write(Reg::S(VCC)).unwrap();
-            let restored = p.blocks[2].insts[0].write(Reg::S(EXEC)).unwrap();
-            assert_eq!(s.masks[&restored] == s.masks[&compare], intact);
         }
     }
 

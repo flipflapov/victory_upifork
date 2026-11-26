@@ -24,8 +24,14 @@
 #[cfg(windows)]
 mod console_insn;
 mod crash;
+#[cfg(windows)]
+pub mod descriptor_sites;
+pub mod frame_rate;
 pub mod prepare;
+pub(crate) mod publish;
 pub mod resolve;
+#[cfg(all(windows, feature = "diagnostics"))]
+mod profile;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod stacks;
 #[cfg(windows)]
@@ -34,6 +40,8 @@ mod threads;
 mod thunks;
 #[cfg(windows)]
 mod tls;
+#[cfg(windows)]
+pub mod write_sites;
 #[cfg(windows)]
 mod windows;
 
@@ -47,8 +55,10 @@ pub use prepare::{PrepareError, PreparedImage, prepare};
 pub use resolve::{ImportResolver, Provenance, Resolution};
 #[cfg(all(windows, feature = "diagnostics"))]
 pub use stacks::{dump_stacks, dump_stacks_on_schedule};
+#[cfg(all(windows, feature = "diagnostics"))]
+pub use profile::profile_on_schedule;
 #[cfg(windows)]
-pub use threads::disable_thread_calls;
+pub use threads::{disable_thread_calls, set_before_thread_shutdown};
 #[cfg(windows)]
 pub use thunks::{UnimplementedPolicy, unimplemented_call_count};
 #[cfg(windows)]

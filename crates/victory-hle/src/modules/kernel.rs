@@ -7,7 +7,7 @@
 // API would trust.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-use std::ffi::{CStr, c_void};
+use std::ffi::{CStr, c_char, c_void};
 
 use crate::{HleModule, HostPolicy, hle_export, registry, runtime};
 
@@ -52,10 +52,7 @@ pub extern "system" fn GetModuleFileNameW(module: *mut c_void, out: *mut u16, si
         return host::get_module_file_name_w(module, out, size);
     };
     let wide: Vec<u16> = path.encode_utf16().collect();
-    // SAFETY: the title passes a buffer of `size` characters.
-    copy_truncated(&wide, unsafe {
-        std::slice::from_raw_parts_mut(out, size as usize)
-    })
+    copy_truncated(&wide, title_buffer(out, size))
 }
 
 /// See [`GetModuleFileNameW`].
@@ -63,10 +60,18 @@ pub extern "system" fn GetModuleFileNameA(module: *mut c_void, out: *mut u8, siz
     let Some(path) = title_path(module) else {
         return host::get_module_file_name_a(module, out, size);
     };
-    // SAFETY: the title passes a buffer of `size` bytes.
-    copy_truncated(path.as_bytes(), unsafe {
-        std::slice::from_raw_parts_mut(out, size as usize)
-    })
+    copy_truncated(path.as_bytes(), title_buffer(out, size))
+}
+
+/// The title's buffer of `size` elements; none for a null pointer (a slice
+/// may not start at null, even an empty one, so `(NULL, 0)` would be
+/// undefined behaviour).
+fn title_buffer<'a, T>(out: *mut T, size: u32) -> &'a mut [T] {
+    if out.is_null() {
+        return &mut [];
+    }
+    // SAFETY: the title passes a buffer of `size` elements.
+    unsafe { std::slice::from_raw_parts_mut(out, size as usize) }
 }
 
 fn title_path(module: *mut c_void) -> Option<String> {
@@ -229,75 +234,29 @@ pub extern "system" fn OutputDebugStringW(text: *const u16) {
     }
 }
 
-/// The line logged when the title ends the process, and the code the host
-/// then exits with. A function so the text and the code are tested without
-/// ending the test process.
-fn title_exit(call: &str, code: u32, from: &str) -> (String, i32) {
-    (
-        format!("title ended the process: call {call}, code {code}, from {from}"),
-        code as i32,
-    )
-}
-
-/// Puts the line on disk before the process goes: the log writes to the
-/// standard error, which is unbuffered, but a flush says so.
-fn flush_log() {
-    use std::io::Write;
-    let _ = std::io::stderr().flush();
-}
-
-/// Logs a title-chosen exit and returns the code the host exits with.
-fn log_title_exit(call: &str, code: u32, from: &str) -> i32 {
-    let (line, code) = title_exit(call, code, from);
-    tracing::warn!("{line}");
-    flush_log();
-    code
-}
-
 /// The CRT's `exit`, through which the title's entry point returns: logs
 /// the code and the caller, then exits on the host.
 pub extern "C" fn exit(code: i32) -> ! {
-    let from = host::callers();
-    host::exit(log_title_exit("exit", code as u32, &from))
+    tracing::warn!(code, from = %host::callers(), "title exits");
+    host::exit(code)
 }
 
-/// The kernel's `ExitProcess`: logged as [`exit`] is, then the host's own
-/// with the title's code (without this export it was bound silently).
-/// Not the CRT's `exit`: that runs the exit table on the calling thread
-/// while the title's other threads live, where an exit function waiting
-/// for a lock the caller or another thread holds hung the process before
-/// anything ended it. Windows ends the other threads first and runs no
-/// exit table of the program; its loader detaches the DLLs it loaded.
-/// shortcut: title images we mapped get no `DLL_PROCESS_DETACH` this way
-/// (`victory_loader`'s detach runs from the CRT's exit only): a title that
-/// needs its images' detach code at a direct `ExitProcess` would need it
-/// called here after the other threads end.
-pub extern "system" fn ExitProcess(code: u32) -> ! {
-    let from = host::callers();
-    log_title_exit("ExitProcess", code, &from);
-    host::exit_process(code)
-}
-
-/// The CRT's `abort` (also reached from `terminate`): logged like [`exit`],
-/// with the CRT's abort code.
+/// The CRT's `abort` (also reached from `terminate`): logged like [`exit`].
 pub extern "C" fn abort() -> ! {
-    let from = host::callers();
-    log_title_exit("abort", 3, &from);
+    tracing::error!(from = %host::callers(), "title aborts");
     host::abort()
 }
 
 /// The CRT's `terminate` and the STL's invalid-argument exit: logged, then
 /// the host's `abort`.
 pub extern "C" fn terminate() -> ! {
-    let from = host::callers();
-    log_title_exit("terminate", 3, &from);
+    tracing::error!(from = %host::callers(), "title calls terminate");
     host::abort()
 }
 
 /// See [`terminate`].
 pub extern "C" fn _invalid_parameter_noinfo_noreturn() -> ! {
-    let from = host::callers();
-    log_title_exit("_invalid_parameter_noinfo_noreturn", 3, &from);
+    tracing::error!(from = %host::callers(), "title passed an invalid parameter");
     host::abort()
 }
 
@@ -326,8 +285,7 @@ extern "system" fn report_unhandled(info: *const c_void) -> i32 {
 /// See [`exit`]; only the current process is logged.
 pub extern "system" fn TerminateProcess(process: *mut c_void, code: u32) -> i32 {
     if process as isize == -1 {
-        let from = host::callers();
-        log_title_exit("TerminateProcess", code, &from);
+        tracing::warn!(code, from = %host::callers(), "title terminates the process");
     }
     host::terminate_process(process, code)
 }
@@ -397,6 +355,85 @@ fn refuse(file: &str) {
 
 const ERROR_MOD_NOT_FOUND: u32 = 126;
 
+/// The title's argument list: the program, then what was given after `--`.
+/// The host's own would be ours (`victory run <exe> ...`), and the title
+/// looks at fixed places in it (`-skipToIIS` only as the first argument).
+struct TitleArgv {
+    count: std::cell::UnsafeCell<i32>,
+    list: std::cell::UnsafeCell<*mut *mut c_char>,
+}
+
+// SAFETY: never written here after it was made; the title's C runtime start
+// reads it once, on one thread.
+unsafe impl Send for TitleArgv {}
+// SAFETY: as above.
+unsafe impl Sync for TitleArgv {}
+
+/// Kept for the whole run: the title holds on to the pointers.
+fn title_argv(program: &str, args: &[String]) -> TitleArgv {
+    let list: Vec<*mut c_char> = std::iter::once(program)
+        .chain(args.iter().map(String::as_str))
+        .filter_map(|a| std::ffi::CString::new(a).ok())
+        .map(std::ffi::CString::into_raw)
+        .collect();
+    let count = list.len() as i32;
+    // `argv[argc]` is null.
+    let list: Box<[*mut c_char]> = list.into_iter().chain(Some(std::ptr::null_mut())).collect();
+    TitleArgv {
+        count: count.into(),
+        list: Box::leak(list).as_mut_ptr().into(),
+    }
+}
+
+fn argv() -> &'static TitleArgv {
+    static ARGV: std::sync::OnceLock<TitleArgv> = std::sync::OnceLock::new();
+    ARGV.get_or_init(|| {
+        // The program's name stays what the host says (as it was before).
+        let program = std::env::args_os().next().unwrap_or_default();
+        let args = runtime::title_args();
+        tracing::info!(?args, "the title's arguments");
+        title_argv(&program.to_string_lossy(), args)
+    })
+}
+
+/// See [`TitleArgv`].
+pub extern "C" fn __p___argc() -> *mut i32 {
+    argv().count.get()
+}
+
+/// See [`TitleArgv`].
+pub extern "C" fn __p___argv() -> *mut *mut *mut c_char {
+    argv().list.get()
+}
+
+/// The title's thread priorities, but for the lowest two, which become
+/// "below normal". Six of the title's threads run at "idle", the streaming
+/// pager's among them; on the console they have what the rest of the title
+/// leaves of its cores. A PC's processors are also wanted by other programs
+/// and by our own workers (sixteen when pipelines are made): with every
+/// one of them busy such a thread ran once in four seconds or so, when the
+/// host's scheduler took pity, and the loading that waits for it with it
+/// (run stream-3: loads seen to be done 1.1 s late on average, 4.8 s at
+/// worst). `VICTORY_TITLE_PRIORITIES=0`: as the title sets them.
+fn title_priority(asked: i32) -> i32 {
+    const IDLE: i32 = -15;
+    const LOWEST: i32 = -2;
+    const BELOW_NORMAL: i32 = -1;
+    match asked {
+        IDLE..=LOWEST => BELOW_NORMAL,
+        other => other,
+    }
+}
+
+/// [`title_priority`].
+pub extern "system" fn SetThreadPriority(thread: *mut c_void, priority: i32) -> i32 {
+    static AS_SET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let as_set = *AS_SET.get_or_init(|| std::env::var_os("VICTORY_TITLE_PRIORITIES").is_some_and(|v| v == "0"));
+    let priority = if as_set { priority } else { title_priority(priority) };
+    // SAFETY: the title passes a thread handle.
+    unsafe { windows_sys::Win32::System::Threading::SetThreadPriority(thread, priority) }
+}
+
 pub(crate) fn module() -> HleModule {
     HleModule {
         name: "kernel",
@@ -410,6 +447,8 @@ pub(crate) fn module() -> HleModule {
             "api-ms-win-crt-runtime-*",
         ],
         exports: vec![
+            hle_export!(__p___argc),
+            hle_export!(__p___argv),
             hle_export!(GetModuleHandleW),
             hle_export!(GetModuleHandleA),
             hle_export!(GetModuleFileNameW),
@@ -424,12 +463,12 @@ pub(crate) fn module() -> HleModule {
             hle_export!(OutputDebugStringA),
             hle_export!(OutputDebugStringW),
             hle_export!(exit),
-            hle_export!(ExitProcess),
             hle_export!(abort),
             hle_export!(terminate),
             hle_export!(_invalid_parameter_noinfo_noreturn),
             hle_export!(TerminateProcess),
             hle_export!(SetUnhandledExceptionFilter),
+            hle_export!(SetThreadPriority),
         ],
     }
 }
@@ -522,11 +561,6 @@ mod host {
     pub(super) fn exit(code: i32) -> ! {
         // SAFETY: see above.
         unsafe { crt_exit(code) }
-    }
-
-    pub(super) fn exit_process(code: u32) -> ! {
-        // SAFETY: see above.
-        unsafe { windows_sys::Win32::System::Threading::ExitProcess(code) }
     }
 
     pub(super) fn abort() -> ! {
@@ -626,10 +660,6 @@ mod host {
         std::process::exit(code)
     }
 
-    pub(super) fn exit_process(code: u32) -> ! {
-        std::process::exit(code as i32)
-    }
-
     pub(super) fn abort() -> ! {
         std::process::abort()
     }
@@ -653,73 +683,22 @@ mod host {
 mod tests {
     use super::*;
 
-    /// A title-chosen exit's line names the call, the code and the caller,
-    /// and the code the host exits with. The text is the one the harness
-    /// matches, so it is fixed.
+    /// The title's idle and lowest threads run below normal; the others as
+    /// it sets them.
     #[test]
-    fn a_title_exit_line_names_the_call_code_and_caller() {
-        assert_eq!(
-            title_exit("exit", 127, "game.exe+0x1234"),
-            (
-                "title ended the process: call exit, code 127, from game.exe+0x1234".to_owned(),
-                127
-            )
-        );
-        // An exit code that arrives as a negative i32 keeps its bits.
-        assert_eq!(title_exit("exit", (-1i32) as u32, "").1, -1);
-    }
-
-    /// The title's `ExitProcess` ends the process as Windows does: the
-    /// CRT's exit table does not run on the calling thread while the
-    /// title's other threads live, and the process ends with the title's
-    /// code. Through the CRT's `exit` instead, an exit function that wants
-    /// a lock the caller holds hung the process before anything else ran
-    /// (Sol, integration review). A child process of this test binary
-    /// makes that call; the test waits for it at most 30 seconds.
-    #[cfg(windows)]
-    #[test]
-    fn a_title_exit_process_ends_as_windows_does_with_its_code() {
-        const CHILD: &str = "VICTORY_TEST_EXIT_PROCESS_CHILD";
-        const CODE: u32 = 0x8765_4321;
-        if std::env::var_os(CHILD).is_some() {
-            static HELD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-            extern "C" fn wants_the_lock() {
-                drop(HELD.lock());
-            }
-            unsafe extern "C" {
-                fn atexit(f: extern "C" fn()) -> i32;
-            }
-            let _held = HELD.lock().unwrap();
-            // SAFETY: registers a function with the CRT's exit table.
-            assert_eq!(unsafe { atexit(wants_the_lock) }, 0);
-            // Another thread alive, as the title's are.
-            drop(std::thread::spawn(|| {
-                loop {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                }
-            }));
-            ExitProcess(CODE);
-        }
-        let exe = std::env::current_exe().unwrap();
-        let mut child = std::process::Command::new(exe)
-            .args(["--exact", "modules::kernel::tests::a_title_exit_process_ends_as_windows_does_with_its_code", "--nocapture"])
-            .env(CHILD, "1")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        let started = std::time::Instant::now();
-        let status = loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                break status;
-            }
-            if started.elapsed() > std::time::Duration::from_secs(30) {
-                let _ = child.kill();
-                panic!("the title's ExitProcess did not end the process in 30 s");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        };
-        assert_eq!(status.code().map(|c| c as u32), Some(CODE), "the title's code");
+    fn no_title_thread_waits_for_idle_processors() {
+        let given: Vec<i32> = [-15, -2, -1, 0, 1, 2, 15].into_iter().map(title_priority).collect();
+        assert_eq!(given, [-1, -1, -1, 0, 1, 2, 15]);
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadPriority};
+        std::thread::spawn(|| {
+            // SAFETY: plain calls on this thread.
+            let thread = unsafe { GetCurrentThread() };
+            assert_eq!(SetThreadPriority(thread, -15), 1);
+            // SAFETY: as above.
+            assert_eq!(unsafe { GetThreadPriority(thread) }, -1);
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]
@@ -739,6 +718,29 @@ mod tests {
         let mut small = [0u8; 4];
         assert_eq!(GetModuleFileNameA(module, small.as_mut_ptr(), 4), 4);
         assert_eq!(&small, &[b'C', b':', b'\\', 0]);
+    }
+
+    /// The title's arguments come right after the program, and the list ends
+    /// in a null pointer; without any there is only the program.
+    #[test]
+    fn the_title_gets_its_own_arguments() {
+        let read = |made: &TitleArgv| {
+            // SAFETY: made above, kept for the whole run.
+            unsafe {
+                let (count, list) = (*made.count.get() as usize, *made.list.get());
+                assert!((*list.add(count)).is_null());
+                (0..count)
+                    .map(|i| CStr::from_ptr(*list.add(i)).to_str().unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            }
+        };
+        let some = title_argv("victory.exe", &["-skipToIIS".into(), "-x=1".into()]);
+        assert_eq!(read(&some), ["victory.exe", "-skipToIIS", "-x=1"]);
+        assert_eq!(read(&title_argv("victory.exe", &[])), ["victory.exe"]);
+        // What the title is given: the same list every time.
+        assert_eq!(__p___argc(), __p___argc());
+        // SAFETY: as above.
+        unsafe { assert_eq!((*__p___argc(), (**__p___argv()).is_null()), (1, false)) };
     }
 
     fn w(text: &str) -> Vec<u16> {
@@ -809,5 +811,21 @@ mod tests {
         let runtime = LoadLibraryA(c"xgameruntime.dll".as_ptr().cast());
         assert!(!runtime.is_null());
         assert_eq!(GetModuleHandleW(w("XGameRuntime.dll").as_ptr()), runtime);
+    }
+
+    /// No buffer: nothing written, the error says it was too small.
+    #[test]
+    fn a_title_image_name_into_no_buffer() {
+        let base = 0x7300_0000_0000;
+        runtime::set_image_path(base, std::path::Path::new(r"C:\title\game.exe"));
+        let module = base as *mut c_void;
+        assert_eq!(GetModuleFileNameW(module, std::ptr::null_mut(), 0), 0);
+        assert_eq!(GetModuleFileNameA(module, std::ptr::null_mut(), 0), 0);
+        #[cfg(windows)]
+        {
+            // SAFETY: reads this thread's last error.
+            let last = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+            assert_eq!(last, ERROR_INSUFFICIENT_BUFFER);
+        }
     }
 }

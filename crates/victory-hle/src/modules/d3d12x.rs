@@ -19,6 +19,7 @@ extern "system" fn create_device(
 ) -> HRESULT {
     victory_gpu::resource::use_allocator(super::xmem::XMemAlloc, super::xmem::XMemFree);
     victory_gpu::resource::use_page_mapper(super::xmem::map_alias);
+    victory_gpu::resource::use_many_page_mapper(super::xmem::map_aliases);
     #[cfg(windows)]
     victory_gpu::on_failure(host_gpu_failed);
     device::create(adapter, parameters, iid, out)
@@ -30,10 +31,53 @@ extern "system" fn create_device(
 fn host_gpu_failed(what: &str) -> ! {
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
     victory_loader::log_crash(&format!("VIctory: host GPU failure: {what}"));
+    victory_gpu::pipeline::known::flush_on_gpu_failure();
     const DXGI_ERROR_DEVICE_REMOVED: u32 = 0x887A_0005;
     // SAFETY: ends our own process.
     unsafe { TerminateProcess(GetCurrentProcess(), DXGI_ERROR_DEVICE_REMOVED) };
     unreachable!("the process has ended")
+}
+
+/// Translates `container` into the cache ([`use_shader_cache`]) ahead of
+/// any run: whether it was there already, or why it does not translate.
+pub fn precompile(container: &[u8]) -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        victory_gpu::shader_cache::precompile(container)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = container;
+        Err("no host".into())
+    }
+}
+
+/// Of the cached translations met since the start: those an earlier build
+/// of the translator made, those translated again, and those that came out
+/// different (`victory_gpu::shader_cache`).
+pub fn stale_shaders() -> (u64, u64, u64) {
+    #[cfg(windows)]
+    {
+        victory_gpu::shader_cache::stale_counts()
+    }
+    #[cfg(not(windows))]
+    {
+        (0, 0, 0)
+    }
+}
+
+/// The fork's offline warm-up (`victory translate --warm`), by
+/// [`precompile`]: whether it was translated now.
+pub fn warm_shader(container: &[u8]) -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        victory_gpu::shader_cache::precompile(container).map(|was_there| !was_there)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = container;
+        Err("no shader cache on this host".into())
+    }
 }
 
 /// Keeps the host's translations of the title's shaders in `dir` (a
@@ -48,9 +92,6 @@ pub fn use_shader_cache(dir: std::path::PathBuf) {
     #[cfg(not(windows))]
     let _ = dir;
 }
-
-#[cfg(windows)]
-pub use victory_gpu::pipeline::{save_pipeline_cache, warm};
 
 pub(crate) fn module() -> HleModule {
     HleModule {

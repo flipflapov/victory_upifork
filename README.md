@@ -1,102 +1,213 @@
 # ЮПИ Лаунчер (victory_upifork)
 
-Форк [DexNom Runtime](https://github.com/DexNom/VIctory) (VIctory) для NVIDIA
-RTX 3060 12 ГБ на Windows 11. Файлов игры здесь нет: нужна своя копия.
+Сборка VIctory для **NVIDIA RTX 3060 12 ГБ и ПК с 16 ГБ оперативной памяти**
+(Windows 11). Файлов игры здесь нет: нужна своя копия (Series 1.0.2.1).
 
-- **Установка и обновление:** `git pull`, затем `.\Setup.cmd` (в первый раз он
-  спросит, где лежит `game_scarlett_master.exe`). Ставится в
-  `%LOCALAPPDATA%\UPI Launcher`; установка DexNom Runtime переносится туда сама
-  (сохранения, кэш шейдеров, логи). Запуск: ярлык **ЮПИ Лаунчер** с иконкой
-  «VI» на рабочем столе и в меню «Пуск» (иконку рисует `Setup.cmd`).
-- **Настройки лаунчера по умолчанию** (переменная, заданная вручную, важнее):
-  `VICTORY_CARD_BUFFERS_MIN_MB=1`, `VICTORY_CARD_BUFFERS_MB=1024`,
-  `VICTORY_DISPLAY_MODE=1920x1080`. С ними кадр в мире стал 200 мс вместо 306
-  (медианы, RTX 3060, профиль Series X). Профиль Series S даёт чёрный экран.
-- **Размер текстур** (`VICTORY_TEXTURE_MAX=1024` в лаунчере, `0` — без
-  ограничения): копии больших сжатых текстур, которые заливает игра, создаются
-  в видеопамяти без самых крупных уровней детализации, пока сторона не станет
-  не больше 1024 (4096 → 1024 занимает в 16 раз меньше). Память игры и её
-  описания текстур не меняются, перенумеровываются только уровни копии.
-  Когда до порога «нет места» (90 % бюджета видеопамяти) остаётся меньше
-  512 МБ, новые копии делаются не больше 512. Неиспользуемые копии
-  выгружаются тем быстрее, чем меньше осталось до этого порога (15 с — 1 с).
-- **Подготовка кадра на нескольких потоках** (в лаунчере по умолчанию,
-  `0` — выключить): `VICTORY_WIDE_REFRESH=1`, `VICTORY_FILL_WORKERS=4`,
-  `VICTORY_PARALLEL_PRELUDES=1`.
-- **Логи:** `%LOCALAPPDATA%\UPI Launcher\logs`, в `latest.txt` путь к последнему.
-- **Прежняя основа** (форк под AMD с правкой таблицы дескрипторов для NVIDIA):
-  коммит `1e4815a`.
+## Установка и запуск
 
-Ниже README DexNom без изменений.
+1. `git pull`, затем `.\Setup.cmd`. В первый раз он спросит, где лежит
+   `game_scarlett_master.exe`, соберёт `victory.exe` (release) и поставит
+   всё в `%LOCALAPPDATA%\UPI Launcher` (сохранения остаются в `state`).
+2. Ярлыки с иконкой «VI» на рабочем столе и в меню «Пуск»:
+   - **ЮПИ Лаунчер** — профиль Series S (меньше памяти, настройки игры ниже);
+   - **ЮПИ Лаунчер (Series X)** — профиль Series X;
+   - **ЮПИ Лаунчер (безопасный)** — Series S без правок рендера и новейшей
+     многопоточности: первое, что пробовать, если что-то не так.
+3. Логи: `%LOCALAPPDATA%\UPI Launcher\logs`, путь к последнему — в `latest.txt`.
+   Первый запуск долгий: переводятся все шейдеры (кэш — `cache-coolfox`).
+
+Настройки лаунчера — в `launcher/UPI-Launcher.ps1` (переменная `VICTORY_*`,
+заданная вручную, важнее): профиль cool_fox «pareto-residency», три настройки
+GTX 1660 (`CARD_BUFFERS_MB=1024`, `CARD_WINDOWS_MB=768`, `TEXTURE_MIP_DROP=2`,
+на 3 — быстрее и мягче), `WINDOW_BUDGET_MB=1024` для 16 ГБ и правки рендера 1 и 2
+(`PORT_CONSTANTS`, `PORT_DESCRIPTORS`).
+
+## Из чего собрано
+
+- **[Pavl3000/cgbj-fork](https://github.com/Pavl3000/cgbj-fork)**, ветка
+  `wave2/upstream`: уцелевшая копия codec-d/cool_fox (проверен на RTX 12 ГБ,
+  32 ГБ ОЗУ) с первыми двумя волнами переносов.
+- **[Impre-visible/victory-gtx1660](https://github.com/Impre-visible/victory-gtx1660)**:
+  все шесть патчей (0001–0007) и настройки, давшие ~100 мс на кадр на GTX 1660.
+- **[avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX)**
+  `main` (`9576c45`) целиком, слиянием: правки рендера 1 и 2, перевод всех
+  шейдеров игры, исправления для 32-потоковых волн (#142, #82, #66, #4),
+  бюджет ОЗУ для «окон» (#77), переключатель частоты кадров, подсветка.
+  Конфликты решены в пользу поведения cgbj (cool_fox) там, где оно проверено
+  на NVIDIA: бюджеты памяти включены, `draw.rs` от cgbj.
+- **[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)**:
+  его история переписана; нужное (подсветка, пропуск лучей экранных зондов)
+  уже есть в этом дереве. Проходы очистки шейдеров (2155 строк) отложены.
+- **[fablinoo/kelvaroq](https://github.com/fablinoo/kelvaroq)**: отдельная
+  архитектура; его новый слой памяти ещё не опубликован — брать пока нечего.
+
+Авторы сохранены в истории коммитов. Прежняя основа (DexNom) — коммит `9cb06dc`.
 
 ---
 
-# DexNom Runtime
+> ## This fork
+>
+> A fork of **codec-d/cool_fox** at `f4b48ad` (26 November 2026), whose repository
+> was deleted from GitHub — this tree is the surviving copy of its source. It runs
+> an Xbox Series title natively on Windows from files the user supplies and
+> contains no game files, code or assets.
+>
+> Work from **avatarmanz/VIctory-7900XTX** and from **Pavl3000/ztrx** is taken in
+> one commit at a time, each naming its source and author. `docs/integration.md`
+> says what has been taken, what was deliberately left out, and why. `main` is
+> codec-d's tree as it was published; the work is on the `wave*` branches.
+>
+> Licence: GPL-3.0-or-later, as the trees it comes from. The credits below and in
+> `LICENSE` stand; `crates/victory-formats/src/bcpack-tables.bin` is the one file
+> the licence does not cover (`docs/asset-policy.md`).
 
-DexNom Runtime is a community fork of Marvisak's VIctory for Windows x64. It runs an Xbox Series executable from your own game installation and translates its GPU work for Direct3D 12. It builds on the Radeon runtime tested at `e061c69032b84ec6e2ec17340469cd689500dafd` and adds fixes for static sampler selection, wave64 lane masks and integer render targets. Game files, executables, saves and generated shader caches stay on your own computer.
+# VIctory on an RX 7900 XTX
 
-## Run it on your PC
+## Run the codec_d Windows build
 
-1. Use 64-bit Windows and a current Direct3D 12 driver. The game uses mesh shaders and Shader Model 6.6. The Radeon gameplay results and known issues are listed below.
-2. Install Rust for Windows and Visual Studio Build Tools. In the Visual Studio installer, select **Desktop development with C++**, including the x64 MSVC toolset and a Windows 10 or 11 SDK. [Rust installer](https://rustup.rs/) · [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
-3. Download this repository using **Code → Download ZIP**, extract the ZIP to a writable folder, and double-click **Setup.cmd**. Select the Series X game executable inside your own extracted game installation. Keep its accompanying files together. Setup downloads the pinned build dependencies, verifies the BCPack format tables, and compiles the three Windows programs locally. [Download source ZIP](https://github.com/DexNom/VIctory/archive/refs/heads/main.zip)
-4. Open **DexNom Runtime** from the Windows Start menu. Use a controller for the game's first-time setup. The launcher and your local data are in `%LOCALAPPDATA%\DexNom Runtime`. Saves are in `state`, shader caches in `cache`, and per-run diagnostics in `logs`. The file `logs\latest.txt` points to the latest game log.
-
-To update, close the runtime, extract the new source ZIP, and run **Setup.cmd** again. It reuses the saved game path and the same save directory. To select a different installation, pass its executable path to Setup from PowerShell:
-
-```powershell
-.\Setup.cmd -GamePath "D:\My Games\Series X\game_scarlett_master.exe"
-```
-
-To warm the shader cache, open `victory-warm.exe` in the installed runtime directory. The log lists translated and refused shaders. Graphics pipelines also depend on draw state encountered during play. If you see a missing `VCRUNTIME140.dll` error, install Microsoft's x64 redistributable. [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
-
-For a manual build, run `.\Initialize-FormatTables.ps1`, then `cargo build --locked --release -p victory --features diagnostics --bins`. The release binaries are in `target\release`. Place all three together outside the checkout and pass the game executable path to `victory-play.exe`. Custom data and cache directories are documented in the configuration example. [Configuration example](victory.example.toml)
-
-## Try experimental ray tracing on Radeon
-
-After running **Setup.cmd**, open **DexNom Runtime (Experimental RT)** from the Windows Start menu. This starts the game with the acceleration-structure builder, ray traversal and lighting resolve enabled. The shortcut uses your existing saves. Open **DexNom Runtime** for the usual renderer.
-
-To start the same RT configuration from PowerShell:
+Download and extract the Windows x64 ZIP from the [private releases](https://github.com/codec-d/cool_fox/releases/latest). Open PowerShell in the extracted folder and point the launcher at your own complete Xbox dump.
 
 ```powershell
-& "$env:LOCALAPPDATA\DexNom Runtime\victory-play.exe" --rt
+$env:VICTORY_GAME_DIR = 'D:\Games\MyDump'
+.\Play-VIctory.cmd pareto-residency
 ```
 
-Chapter 1 City produced in-range ray and triangle intersections on an RX 7900 XTX. The game builds and traverses its acceleration structures through translated Direct3D 12 compute shaders. Frame times can still reach several seconds. Interior lighting, shadows and performance vary by scene. [Ray-tracing implementation](docs/fork-ray-tracing.md) · [City testing](BENCHMARK.md)
+The launcher selects Series S and the RTX-tested residency settings. It builds its shader cache locally under `%LOCALAPPDATA%\VIctory\cache-pareto`. Set `VICTORY_CACHE_DIR` to reuse an existing cache outside the checkout. Windows x64, an AVX2 CPU, and a Direct3D 12 GPU with shader model 6.6 and mesh shader support are required.
 
-## Changes in this snapshot
+To build from this checkout, install the pinned Rust toolchain and the MSVC C++ build tools with a Windows SDK, then run `cargo build --release --locked -p victory`. The same launcher finds `target\release\victory.exe`. The sections below describe the upstream AMD fork and its separate launcher.
 
-- Pixel shaders that read neighboring pixels in a 2×2 group now preserve the values at triangle edges. On an RX 7900 XTX, this reduced incorrect edge pixels from 32 to zero in each of two adjoining-triangle tests. Cube-map sampling also selects the correct mip level for explicit gradients and honors the shader's minimum mip level.
-- The ray-tracing memory directory can grow beyond 1,023 backing buffers. Each recorded draw or dispatch uses only the views available when it was recorded. Older command lists keep their original views.
-- Streamed textures can upload when only their middle pages are resident. The runtime merges overlapping memory notifications and rescans tracked textures if the notification queue fills. Previously used depth-only pipelines now warm ahead of speculative material pipelines to reduce missing shadows during loading.
-- Some dock objects still appear black in the City save. The same distant dock fixtures appeared dark with the ray-structure builder disabled. The effect of these changes on those objects and on gameplay FPS is still being tested.
-- GPU readback identifies changed pages and combines adjacent copy ranges. This targets CPU/GPU synchronization and transfer overhead.
-- Ray-structure builder dispatches now honor the game's thread counts and mask excess lanes in the final group. Read-only traversal no longer declares the entire guest memory directory writable when the shader sends its output to another buffer or texture.
-- Texture handling searches for contiguous descriptor slots and admits already-resident textures under memory pressure. Earlier changes address publication order, placed-texture ownership and supported render-XOR layouts.
-- Shaders can choose between two static samplers across a uniform branch. This recovered 40 shader variants from the tested archive. Another fix recovered one voxel visibility shader by recognizing a saved and restored wave64 lane mask. Mixed render targets retain their individual write masks when an integer target bypasses blending.
-- The runtime preserves the game's vertex output interpolation and fixes output signature ordering. All 2,191 archive vertex shaders passed the Microsoft DXIL validator, including 18 water shaders. New textures and retries share the upload budget, and a previously refused buffer view is checked again when its backing allocation changes.
-- The runtime resolves guest addresses from ray-tracing descriptors, preserves raw buffer offsets and prepares the memory each command list reads. Texture uploads can proceed while Windows remaps unrelated memory. In-game ray-traced lighting is still experimental.
-- Five additional shadow compute shaders compile and create pipelines on the RX 7900 XTX. The translated ray-node regression also exercises three reflections through the guest-page directory. Changes confined to the standalone execution tests now preserve cached shader translations.
-- Shader translation preserves the guest wave width for lane permutations and handles heap-indexed texture-size queries. Save handling flushes copied blobs before publication and can recover a complete checkpoint.
+A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
+that runs an Xbox Series title natively on Windows from files the user supplies.
 
-The source ZIP builds with the Windows setup script. The test report covers shader validation, a Radeon pipeline check, gameplay frame times and the remaining interior lighting issue. [Test and benchmark report](BENCHMARK.md)
+## The goal
 
-### Testing CPU submission workers
+**A stable 30 fps or more without ray tracing, then as high a frame rate and as
+low frame times as the PC allows**, on an AMD RX 7900 XTX first and on PCs with
+32 GB (later 16 GB) of RAM.
 
-For a local experiment, open PowerShell and run the following after setup. The process uses four CPU workers for eligible upload batches and can record independent transition command lists on the shared worker pool. The final GPU queue, fence signals and resource transitions retain the game's submission order. Compare the same save and camera after the initial streaming period. The default launcher uses the baseline settings.
+The way there is **porting, not emulating**: patching the title's renderer so it
+behaves the way a PC renderer does, rather than having the layer watch and copy
+the console's shared memory every frame. Shaders are translated ahead of time
+into a versioned store that is kept between builds. Ray tracing stays optional
+and off by default. The picture comes after the frame rate: texture pop-in and
+lighting that is too bright or too dark when walking indoors are next in line.
+
+**This repository contains no game files, code or assets.** You need your own
+copy of the game. It is not affiliated with or endorsed by the game's developer
+or publisher.
+
+## Where it stands (2026-11-26)
+
+Tested on one machine only: Windows 11, Intel i9-12900K, 64 GB RAM, Radeon
+RX 7900 XTX, the Series X profile, ray tracing off.
+
+| | |
+|---|---|
+| City street, renderer patches 1+2 on | about 53 ms a frame (about 19 fps) |
+| Same scene before the patches | 57-75 ms (13-17 fps) |
+| Shaders the title uses that translate | all of them (25,790 of 25,985; the rest are unused geometry shaders) |
+| Memory | about 35 GB of private memory: **64 GB of RAM recommended** for now |
+
+It started at 280 ms a frame in the same scenes three days earlier.
+
+### Renderer patches (off by default while they are tested)
+
+| Switch | What it does |
+|---|---|
+| `VICTORY_PORT_CONSTANTS=1` | The title's 174 MB constants heap is read by the card where the title writes it: no uploads, no fills |
+| `VICTORY_PORT_DESCRIPTORS=1` | The title's descriptor-table stores are patched (byte-checked) to report the slots they write, instead of a scan of ~600,000 slots a frame |
+
+What is known to be wrong:
+
+- Trees, signs and far objects flicker in the distance in some places.
+- Lighting is too bright or too dark after walking indoors, until the title has
+  run for a while; rooms with little direct light are too dark without `-RayTracing`.
+- Textures of what just came into view appear late while the title streams.
+- The first run of a new build stutters while the driver makes pipelines
+  (`victory warm` makes them ahead).
+- Recording a frame in the world makes the title's own watchdog end it.
+
+## How to run it
+
+You need Windows 10/11 x64, a CPU with AVX2, a Direct3D 12 GPU with shader
+model 6.6 and mesh shaders, Rust (the toolchain is pinned), the MSVC build
+tools, and your own dump of the title.
 
 ```powershell
-$env:VICTORY_FILL_WORKERS = '4'
-$env:VICTORY_PARALLEL_PRELUDES = '1'
-& "$env:LOCALAPPDATA\DexNom Runtime\victory-play.exe"
+git clone https://github.com/avatarmanz/VIctory-7900XTX
+cd VIctory-7900XTX
+copy victory.example.toml victory.toml      # then set your paths, outside this folder
+cargo build --locked --profile diag -p victory --features diagnostics
+scripts\play.ps1 -Exe <path of your copy's executable>
 ```
 
-## Credits and licensing
+`scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
+something is wrong. `-RayTracing` turns the title's ray-traced indirect light on.
 
-- Marvisak and the VIctory contributors created the original runtime. [Marvisak/VIctory](https://github.com/Marvisak/VIctory)
-- ZSlayerHQ and the contributors to the victory-world line provided the rendering baseline used here, including the Radeon work from triippywhale and asdaasdsaddf. [victory-world-runtime](https://github.com/ZSlayerHQ/victory-world-runtime) · [Integrated revision](https://github.com/ZSlayerHQ/victory-world-runtime/commit/99f8834aa16b98d7f3943b8de262a8d4857bda7b)
-- The XCL contributors published an independent Xbox Series compatibility layer. Their work informed our investigation of shader translation, CPU/GPU memory synchronization and performance. [xcl-dev/xcl](https://github.com/xcl-dev/xcl)
+On a hybrid-graphics PC, the runtime and offline pipeline checks prefer a
+high-performance adapter with Shader Model 6.6. The runtime logs its adapter
+name, PCI vendor and device IDs, and dedicated VRAM. Set
+`VICTORY_D3D12_ADAPTER` to a zero-based DXGI index or part of the adapter's
+name to select it explicitly. With the launcher, pass
+`-More @{VICTORY_D3D12_ADAPTER='NVIDIA'}`.
 
-The upstream README preserves the original credits and historical test results. [Upstream README](README.upstream.md)
+Before the first run, ahead of time (both can be stopped and go on later):
 
-VIctory source is licensed under GPL-3.0-or-later. The upstream project identifies the required BCPack format tables as separately supplied data outside that license. This source archive omits that file. The setup script verifies a local or upstream copy before use. [License](LICENSE) · [Upstream asset policy and table notice](docs/asset-policy.md)
+```powershell
+target\diag\victory.exe shaders <the shader archives>   # every shader translated, minutes
+target\diag\victory.exe warm --used                     # pipelines earlier runs drew with, for a new driver or build
+```
+
+Commands, debugging switches and upstream's own description:
+[docs/README-fxceless.md](docs/README-fxceless.md). Every `VICTORY_...` switch is
+described in a comment where it is read.
+
+## What is different here
+
+In short; the reasons and the measurements are in [docs/findings.md](docs/findings.md).
+
+- **List calls are written down, not carried out, on the title's threads**
+  (`VICTORY_THIN`): eight threads of ours translate them.
+- **Submissions are prepared by a thread of ours and joined**
+  (`VICTORY_ASYNC_SUBMIT`, `VICTORY_JOIN_PARTS`), with what can be spread over
+  threads spread: refreshes, compares (AVX2), descriptor records, landings.
+- **What shaders wrote comes back beside the write guards**, by the dwords that
+  changed, on a thread of its own (`VICTORY_RELAY`, `VICTORY_LAND`).
+- **Buffer fills that need bytes still on the card are done on the card**
+  (`VICTORY_CARD_STEPS`) instead of waiting for it.
+- **The title's writes are caught more cheaply**: one view opened at a fault,
+  blocks that rest, places in the title's code that look before they write.
+- **Textures go up on a copy queue of their own** and a slot shows one only after
+  its upload ran, which also ended a device loss that came every 15 minutes or so.
+- **Boats float**: textures that shaders write and the title's CPU reads go back
+  to title memory (from fxceless and Geckomacabre, on by default here).
+- **Frame record and replay** with per-pass times and shader variants compared
+  turn by turn ([docs/replay.md](docs/replay.md)).
+
+## Credits
+
+This is a tree of other people's work with more on top. The history is kept, and
+commits taken from elsewhere name the commit and its author.
+
+- **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and its
+  contributors: the loader, the runtime services, the Direct3D 12 back end and
+  the shader recompiler.
+- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**: the fork
+  this one started from, and the people whose pull requests it carries.
+- **[DexNom/VIctory](https://github.com/DexNom/VIctory)**: ray tracing fixes,
+  cube gradients, sparse textures.
+- **[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)**:
+  the ambient light idea, pipeline workers, and work by romainhedouin.
+- **[FQY55kai/ZJOU-VICTORY](https://github.com/FQY55kai/ZJOU-VICTORY)**.
+- **[myokex/victory-amd](https://github.com/myokex/victory-amd)**: the guard over
+  every view of a page (with Spexivus, joroyt and tightfall), and Joshua Odom's
+  reads into title memory.
+- **Geckomacabre** and **cxy0072019-sketch**: the texture read-back.
+- **[XCL](https://github.com/ivall/xcl)** (GPL-2.0-only) was read for how the same
+  title behaves under another layer; no code of it is here.
+- This fork's changes were made with [Claude Code](https://claude.com/claude-code).
+
+## License
+
+GPL-3.0-or-later, as VIctory. See [LICENSE](LICENSE); the one file that is not
+covered is named in [docs/asset-policy.md](docs/asset-policy.md).

@@ -64,10 +64,15 @@ if ($game.PSIsContainer -or $game.Extension -ine '.exe') {
 
 Push-Location -LiteralPath $PSScriptRoot
 try {
-    & (Join-Path $PSScriptRoot 'Initialize-FormatTables.ps1')
+    # The BCPack format tables are in this tree (docs/asset-policy.md).
+    if (!(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'crates/victory-formats/src/bcpack-tables.bin'))) {
+        throw 'crates/victory-formats/src/bcpack-tables.bin is missing from the checkout. Run git pull again.'
+    }
     $targetDir = Join-Path $PSScriptRoot 'target'
     $target = 'x86_64-pc-windows-msvc'
-    & cargo build --locked --release -p victory --features diagnostics --bins --target $target --target-dir $targetDir
+    # The plain release build, as codec-d/cool_fox and the GTX 1660 runs
+    # were measured with (the frame statistics line is in it).
+    & cargo build --locked --release -p victory --target $target --target-dir $targetDir
     if ($LASTEXITCODE -ne 0) {
         throw 'Build failed. Check the compiler output and the C++ workload and Windows SDK listed in the README.'
     }
@@ -76,30 +81,34 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'The runtime could not read the selected game executable.' }
 } finally { Pop-Location }
 
-# Hold the same lock as Play and Preload during an install or update.
-$state = [IO.Directory]::CreateDirectory((Join-Path $InstallDir 'state'))
-try {
-    $lock = [IO.File]::Open((Join-Path $state.FullName 'launcher.lock'), 'OpenOrCreate', 'Write', 'None')
-} catch [IO.IOException] {
-    throw "Could not lock the install directory. Close $AppName and shader preload before updating. $($_.Exception.Message)"
-}
-try {
-    foreach ($name in 'victory.exe','victory-play.exe','victory-warm.exe') {
-        $destination = Join-Path $InstallDir $name
-        $temp = Join-Path $InstallDir ([IO.Path]::GetRandomFileName())
-        try {
-            [IO.File]::Copy((Join-Path $release $name), $temp)
-            if ([IO.File]::Exists($destination)) {
+[IO.Directory]::CreateDirectory((Join-Path $InstallDir 'state')) | Out-Null
+$files = @(
+    @{ From = (Join-Path $release 'victory.exe'); To = 'victory.exe' }
+    @{ From = (Join-Path $PSScriptRoot 'launcher/UPI-Launcher.ps1'); To = 'UPI-Launcher.ps1' }
+)
+foreach ($file in $files) {
+    $destination = Join-Path $InstallDir $file.To
+    $temp = Join-Path $InstallDir ([IO.Path]::GetRandomFileName())
+    try {
+        [IO.File]::Copy($file.From, $temp)
+        if ([IO.File]::Exists($destination)) {
+            try {
                 [IO.File]::Replace($temp, $destination, [System.Management.Automation.Language.NullString]::Value)
-            } else {
-                [IO.File]::Move($temp, $destination)
+            } catch [IO.IOException] {
+                throw "Could not replace $destination. Close the game and run Setup.cmd again. $($_.Exception.Message)"
             }
-        } finally { if ([IO.File]::Exists($temp)) { [IO.File]::Delete($temp) } }
-    }
-    [IO.File]::WriteAllText($config, $game.FullName, [Text.UTF8Encoding]::new($false))
-} finally { $lock.Dispose() }
+        } else {
+            [IO.File]::Move($temp, $destination)
+        }
+    } finally { if ([IO.File]::Exists($temp)) { [IO.File]::Delete($temp) } }
+}
+[IO.File]::WriteAllText($config, $game.FullName, [Text.UTF8Encoding]::new($false))
+# The DexNom-based runtime's own launcher and preloader are not this tree's.
+foreach ($stale in 'victory-play.exe', 'victory-warm.exe') {
+    $path = Join-Path $InstallDir $stale
+    if (Test-Path -LiteralPath $path -PathType Leaf) { Remove-Item -LiteralPath $path }
+}
 
-$launcher = Join-Path $InstallDir 'victory-play.exe'
 Write-Host "Installed $AppName in $InstallDir"
 
 # The shortcuts' icon: the Roman numeral VI, white serif letters on a dark
@@ -175,11 +184,17 @@ try {
     $icon = $null
 }
 
-# One shortcut in the Start menu and one on the desktop. The ones of the
-# install before the rename go, and so does its ray tracing shortcut (that
-# mode is for Radeon cards; `victory-play.exe --rt` still starts it).
+# The shortcuts, in the Start menu and on the desktop: the title as a
+# Series S (this fork's default: less memory, the title's lower settings),
+# as a Series X, and safe (no renderer ports or newest threading). Earlier
+# installs' shortcuts go, the ray tracing one too (it is for Radeon cards).
+$powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+if (!(Test-Path -LiteralPath $powershell -PathType Leaf)) { $powershell = 'powershell.exe' }
+$script = Join-Path $InstallDir 'UPI-Launcher.ps1'
+# " (safe)" in Russian, from code points as the name is.
+$safe = ' (' + (-join [char[]](0x0431, 0x0435, 0x0437, 0x043E, 0x043F, 0x0430, 0x0441, 0x043D, 0x044B, 0x0439)) + ')'
 $desktop = [Environment]::GetFolderPath('Desktop')
-foreach ($stale in 'DexNom Runtime.lnk', 'DexNom Runtime (Experimental RT).lnk') {
+foreach ($stale in 'DexNom Runtime.lnk', 'DexNom Runtime (Experimental RT).lnk', "$AppName (Series S).lnk") {
     foreach ($folder in $ShortcutDirectory, $desktop) {
         $path = Join-Path $folder $stale
         if (Test-Path -LiteralPath $path -PathType Leaf) { Remove-Item -LiteralPath $path }
@@ -188,19 +203,18 @@ foreach ($stale in 'DexNom Runtime.lnk', 'DexNom Runtime (Experimental RT).lnk')
 $shell = New-Object -ComObject WScript.Shell
 foreach ($folder in $ShortcutDirectory, $desktop) {
     [IO.Directory]::CreateDirectory($folder) | Out-Null
-    # The second one runs the title as a Series S: its own lower settings
-    # and less memory (victory-play.exe --series-s).
     foreach ($entry in @(
-        @{ Name = $AppName; Arguments = '' }
-        @{ Name = "$AppName (Series S)"; Arguments = '--series-s' }
+        @{ Name = $AppName; Switch = '' }
+        @{ Name = "$AppName (Series X)"; Switch = ' -SeriesX' }
+        @{ Name = "$AppName$safe"; Switch = ' -Safe' }
     )) {
         $shortcut = $shell.CreateShortcut((Join-Path $folder ($entry.Name + '.lnk')))
-        $shortcut.TargetPath = $launcher
-        $shortcut.Arguments = $entry.Arguments
+        $shortcut.TargetPath = $powershell
+        $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$script`"$($entry.Switch)"
         $shortcut.WorkingDirectory = $InstallDir
         $shortcut.Description = $entry.Name
         if ($icon) { $shortcut.IconLocation = "$icon,0" }
         $shortcut.Save()
     }
 }
-Write-Host "Open $AppName from the desktop or the Start menu to play; $AppName (Series S) runs it with lower settings."
+Write-Host "Open $AppName from the desktop or the Start menu to play. Logs: $(Join-Path $InstallDir 'logs')"

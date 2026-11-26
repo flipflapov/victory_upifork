@@ -52,10 +52,22 @@ pub const LOADS: u32 = 16;
 /// half has a lane where every lane is in EXEC (`lower.rs`,
 /// `v_readfirstlane_b32`).
 pub const FIRST: u32 = 32;
+/// Not a pass over the module either: the lowering reads the dwords of one
+/// console load (`s_buffer_load_dwordx2` to `x16` from an SRV, a
+/// `global_load_dwordx2` to `x4`) by one call for every four of them, not
+/// by a call each (`lower.rs`, `raw_dwords`). The same bytes are read.
+/// From fxceless/victory-fork c36971b2. On an RX 7900 XTX it is worth nothing:
+/// the yard's frame replayed turn by turn, dispatches and draws 18.47 -> 18.45
+/// ms (12 loops) and 18.23 -> 18.16 (5 loops): the driver joins the loads.
+pub const WIDE: u32 = 64;
 /// The passes over the module.
 pub const MODULE: u32 = DEAD | FOLD | REUSE | FACTS | LOADS;
 /// Every pass.
-pub const ALL: u32 = MODULE | FIRST;
+pub const ALL: u32 = MODULE | FIRST | WIDE;
+/// The passes that run when nothing says which: every one but [`WIDE`],
+/// which no card has shown a gain for yet (`VICTORY_SHADER_OPT=127` asks
+/// for it).
+pub const DEFAULT: u32 = ALL & !WIDE;
 
 /// What the instructions a module writes use, of the features a shader
 /// declares by flag (the validator's "flags must match usage").
@@ -63,6 +75,8 @@ pub const ALL: u32 = MODULE | FIRST;
 pub(crate) struct Usage {
     /// A wave or quad operation.
     pub wave_ops: bool,
+    /// A rasterizer ordered view.
+    pub rovs: bool,
     /// A 64-bit integer, as a result or an operand.
     pub int64: bool,
     /// A typed load of several components from a UAV.
@@ -388,13 +402,89 @@ impl Module {
     }
 
     /// An integer constant's width and value (the bits of that width).
-    fn int_k(&self, v: V) -> Option<(u32, u64)> {
+    pub(crate) fn int_k(&self, v: V) -> Option<(u32, u64)> {
         let V::Const(i) = v else { return None };
         let (ty, Const::Int(x)) = &self.consts[i as usize] else {
             return None;
         };
         let bits = self.int_bits(*ty)?;
         Some((bits, *x as u64 & mask(bits)))
+    }
+
+    /// The bits of a 32-bit float that is a constant, given as one or as a
+    /// cast of an integer constant.
+    pub(crate) fn float_k(&self, v: V) -> Option<f32> {
+        let (v, cast) = match v {
+            V::Inst(i) => match self.insts[i as usize].op {
+                Op::Cast(Cast::Bitcast, x) => (x, true),
+                _ => return None,
+            },
+            _ => (v, false),
+        };
+        let V::Const(i) = v else { return None };
+        match &self.consts[i as usize].1 {
+            Const::Float(bits) if !cast => Some(f32::from_bits(*bits)),
+            Const::Int(_) if cast => {
+                let (bits, x) = self.int_k(v)?;
+                (bits == 32).then_some(f32::from_bits(x as u32))
+            }
+            _ => None,
+        }
+    }
+
+    /// For a float that is a number and not an infinity whatever the program
+    /// reads: a power of two its magnitude does not pass.
+    pub(crate) fn bounded(&self, v: V, depth: u32) -> Option<f32> {
+        if let Some(k) = self.float_k(v) {
+            return k.is_finite().then(|| k.abs().max(1e-30).log2().ceil());
+        }
+        let V::Inst(i) = v else { return None };
+        let depth = depth.checked_sub(1)?;
+        let of = |v: V| self.bounded(v, depth);
+        // (A power that overflows, or might with rounding, is no bound.)
+        let held = |b: f32| (b < 126.0).then_some(b);
+        match &self.insts[i as usize].op {
+            Op::Cast(Cast::UiToFp | Cast::SiToFp, _) => Some(32.0),
+            Op::Cast(Cast::Bitcast, x) => match *x {
+                V::Inst(j) => match self.insts[j as usize].op {
+                    Op::Cast(Cast::Bitcast, y) if self.type_of(y) == self.type_of(v) => of(y),
+                    _ => None,
+                },
+                _ => None,
+            },
+            Op::Bin(Bin::Mul, a, b) => held(of(*a)? + of(*b)?),
+            Op::Bin(Bin::Add | Bin::Sub, a, b) => held(of(*a)?.max(of(*b)?) + 1.0),
+            Op::Select(_, a, b) => Some(of(*a)?.max(of(*b)?)),
+            Op::Call(_, args) => {
+                let (_, code) = self.int_k(*args.first()?)?;
+                match (code, &args[1..]) {
+                    // Saturated, a fraction, a cosine or sine (of a number).
+                    (7, [_]) => Some(0.0),
+                    (6, [x]) => of(*x),
+                    (22 | 12 | 13, [x]) => of(*x).map(|_| 0.0),
+                    (26..=29, [x]) => held(of(*x)? + 1.0),
+                    // Of two numbers; or one of them the other way round: the
+                    // minimum (36) of a constant and a maximum of another.
+                    (35 | 36, [a, b]) => match (of(*a), of(*b)) {
+                        (Some(x), Some(y)) => Some(x.max(y)),
+                        _ => {
+                            let other = if code == 35 { 36 } else { 35 };
+                            let (inner, k) = if self.float_k(*b).is_some() { (*a, *b) } else { (*b, *a) };
+                            let k = self.float_k(k).and_then(|_| of(k))?;
+                            let V::Inst(j) = inner else { return None };
+                            let Op::Call(_, inner) = &self.insts[j as usize].op else { return None };
+                            let (_, code) = self.int_k(*inner.first()?)?;
+                            let low = inner[1..].iter().find(|x| self.float_k(**x).is_some())?;
+                            (code == other).then_some(())?;
+                            Some(k.max(of(*low)?))
+                        }
+                    },
+                    (46, [a, b, c]) => held((of(*a)? + of(*b)?).max(of(*c)?) + 1.0),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     /// The constant `x` of the integer type `ty`, kept sign-extended as
@@ -1009,6 +1099,8 @@ impl Module {
                         Some((_, 0)) => u.heap_views = true,
                         _ => u.heap_samplers = true,
                     }
+                } else if name == "annotateHandle" {
+                    u.rovs |= annotation(V::Inst(i)).is_some_and(|(kind, _)| kind & 0x2000 != 0);
                 } else if name.starts_with("atomic") && name.ends_with(".i64") {
                     u.atomic64 = true;
                 } else if name.starts_with("textureLoad") || name.starts_with("bufferLoad") {
@@ -2132,5 +2224,114 @@ mod tests {
         }
         // The programs are of the wasteful kind: the passes find work.
         assert!(removed > 4000, "{removed} instructions removed");
+    }
+
+    /// As written: the most branches back one block makes, and the most
+    /// blocks that branch back to one header.
+    fn back_edges(m: &Module) -> (usize, usize) {
+        let (layout, fold) = m.layout();
+        let mut pos = vec![usize::MAX; m.blocks.len()];
+        for (n, &b) in layout.iter().enumerate() {
+            pos[b] = n;
+        }
+        let mut into = vec![0; m.blocks.len()];
+        let mut most = 0;
+        for &b in &layout {
+            let mut to: Vec<usize> = successors(m.blocks[b].term)
+                .iter()
+                .map(|&t| fold[t].map_or(t, |(_, h)| h))
+                .filter(|&t| pos[t] <= pos[b])
+                .collect();
+            to.dedup();
+            most = most.max(to.len());
+            to.iter().for_each(|&h| into[h] += 1);
+        }
+        (most, into.into_iter().max().unwrap_or(0))
+    }
+
+    #[test]
+    fn every_loop_has_one_branch_back() {
+        let mut k = kit();
+        let i32t = k.m.int(32);
+        let fty = k.m.func_ty(i32t, vec![i32t, i32t]);
+        let input =
+            k.m.function("dx.op.loadInput.i32", fty, Some(Attr::ReadNone), false);
+        let Kit {
+            mut m, b, writes, ..
+        } = k;
+        let [h1, h2, exit, h3, odd, even, e3, h4, h5, c1, c2, e4] =
+            std::array::from_fn(|_| m.new_block());
+        let (zero, one, two, three) = (m.i32(0), m.i32(1), m.i32(2), m.i32(3));
+        let x = m.call(b, input, vec![zero, one]);
+        m.terminate(b, Term::Br(h1));
+        // An inner loop whose latch is the outer loop's latch too.
+        let i = m.phi(h1, i32t);
+        let i1 = m.bin(h1, Bin::Add, i, one);
+        m.call(h1, writes, vec![i1, x]);
+        let out = m.cmp(h1, pred::IUGE, i1, three);
+        m.terminate(h1, Term::CondBr(out, exit, h2));
+        let j = m.phi(h2, i32t);
+        let j1 = m.bin(h2, Bin::Add, j, one);
+        m.call(h2, writes, vec![j1, i]);
+        let more = m.cmp(h2, pred::IULT, j1, two);
+        m.terminate(h2, Term::CondBr(more, h2, h1));
+        m.set_phi(i, vec![(zero, b), (i1, h2)]);
+        m.set_phi(j, vec![(zero, h1), (j1, h2)]);
+        m.terminate(exit, Term::Br(h3));
+        // A loop with two latches, which carry different values round.
+        let kk = m.phi(h3, i32t);
+        let k1 = m.bin(h3, Bin::Add, kk, one);
+        let low = m.bin(h3, Bin::And, k1, one);
+        let is_odd = m.cmp(h3, pred::NE, low, zero);
+        m.terminate(h3, Term::CondBr(is_odd, odd, even));
+        let ka = m.bin(odd, Bin::Add, k1, two);
+        let seven = m.i32(7);
+        let again = m.cmp(odd, pred::IULT, ka, seven);
+        m.terminate(odd, Term::CondBr(again, h3, e3));
+        let kb = m.bin(even, Bin::Mul, k1, three);
+        m.call(even, writes, vec![kb, kk]);
+        let thirty = m.i32(30);
+        let again = m.cmp(even, pred::IULT, kb, thirty);
+        m.terminate(even, Term::CondBr(again, h3, e3));
+        m.set_phi(kk, vec![(zero, exit), (ka, odd), (kb, even)]);
+        let last = m.phi(e3, i32t);
+        m.set_phi(last, vec![(ka, odd), (kb, even)]);
+        m.call(e3, writes, vec![last, x]);
+        m.terminate(e3, Term::Br(h4));
+        // One block above the empty latches of an inner and an outer loop.
+        let l = m.phi(h4, i32t);
+        let l1 = m.bin(h4, Bin::Add, l, one);
+        let done = m.cmp(h4, pred::IUGE, l1, three);
+        m.terminate(h4, Term::CondBr(done, e4, h5));
+        let q = m.phi(h5, i32t);
+        let q1 = m.bin(h5, Bin::Add, q, one);
+        m.call(h5, writes, vec![q1, l1]);
+        let inner = m.cmp(h5, pred::IULT, q1, two);
+        m.terminate(h5, Term::CondBr(inner, c1, c2));
+        m.terminate(c1, Term::Br(h5));
+        m.terminate(c2, Term::Br(h4));
+        m.set_phi(l, vec![(zero, e3), (l1, c2)]);
+        m.set_phi(q, vec![(zero, h4), (q1, c1)]);
+        m.terminate(e4, Term::Ret);
+
+        let inputs: Vec<Vec<u32>> = vec![vec![0; 7], (0..7).collect(), vec![u32::MAX; 7]];
+        let before: Vec<_> = inputs.iter().map(|i| run(&m, i)).collect();
+        assert!(
+            before
+                .iter()
+                .all(|t| t.last().is_some_and(|e| e.0 == "ret"))
+        );
+        assert_eq!(back_edges(&m), (2, 2), "both shapes, as made");
+        // Of the two empty latches below one block, the inner loop's is
+        // folded into it, the outer loop's stays.
+        let (_, fold) = m.layout();
+        assert_eq!((fold[c1], fold[c2]), (Some((h5, h5)), None));
+
+        m.one_back_edge_each();
+        assert_eq!(back_edges(&m), (1, 1));
+        for (i, want) in inputs.iter().zip(&before) {
+            assert_eq!(&run(&m, i), want);
+        }
+        m.write();
     }
 }

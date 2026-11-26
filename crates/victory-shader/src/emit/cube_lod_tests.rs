@@ -1,3 +1,6 @@
+//! Cube samples with gradients select their level by the footprint (after
+//! DexNom/VIctory 921d8d3b).
+
 use super::host::{Dispatch, Host, Root, View};
 use super::intersect_tests::build_compute_shader;
 use crate::native::{
