@@ -18,10 +18,15 @@
 #             memory: slow on a PC of 16 GB, it pages)
 #   -Safe     Series S without the newest threading
 #             (the first thing to try when something is wrong)
+#   -NoPrep   leaves the PC as it is (by default, while the game runs: the
+#             high performance power plan, Game DVR off, and programs in the
+#             background at below normal CPU and low memory priority with
+#             their RAM handed back; all undone when the game ends; after
+#             neptune-turbo.ps1 of Dolberthi/neptune-dolberth-nvidia-8gb)
 # A VICTORY_* variable set before this script runs wins over its setting.
 # Keep this file ASCII: Windows PowerShell 5.1 reads a script without a byte
 # order mark in the system code page.
-param([switch]$Turbo, [switch]$SeriesX, [switch]$Safe)
+param([switch]$Turbo, [switch]$SeriesX, [switch]$Safe, [switch]$NoPrep)
 $ErrorActionPreference = 'Stop'
 
 $here = $PSScriptRoot
@@ -98,6 +103,11 @@ if ($Turbo -and !$Safe) {
     # them: no copy, no refresh, nothing sent up (stage 1 of crate::inplace;
     # their pages stay in RAM while in place, at most 4 GB)
     $settings['VICTORY_INPLACE'] = '1'
+    # Neptune by Dolberth's smart copy-back (their tested profile): what
+    # shaders write into title buffers over 4 KB stays on the card until a
+    # copy or fill of the title reads it (63 MB a frame came back here)
+    $settings['VICTORY_SMART_COPY_BACK'] = '1'
+    $settings['VICTORY_SMART_COPY_BACK_KB'] = '4'
 }
 foreach ($k in $settings.Keys) {
     if (!(Test-Path "Env:$k")) { Set-Item "Env:$k" $settings[$k] }
@@ -118,6 +128,113 @@ if ($commitGb -gt 0 -and $commitGb -lt 40) {
     Write-Warning "Windows can commit only $commitGb GB (RAM + page file). Set the page file on C: to 49152 MB: System, About, Advanced system settings, Performance, Advanced, Virtual memory. With less the game slows down and holds textures back."
 }
 
+# PC preparation while the game runs (after neptune-turbo.ps1 "Preparar" of
+# Dolberthi/neptune-dolberth-nvidia-8gb, GPL-3.0-or-later). On 16 GB the
+# game pages: what other programs hold in RAM is what it lacks.
+function Start-UpiPrep {
+    $ErrorActionPreference = 'Continue'
+    if (-not ('UpiPrepNative' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class UpiPrepNative {
+    [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetProcessInformation(IntPtr h, int cls, ref uint info, uint size);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetProcessInformation(IntPtr h, int cls, ref uint info, uint size);
+    [DllImport("psapi.dll", SetLastError = true)] static extern bool EmptyWorkingSet(IntPtr h);
+    const uint SET_INFORMATION = 0x0200, QUERY_LIMITED = 0x1000, SET_QUOTA = 0x0100, QUERY_INFORMATION = 0x0400;
+    const int ProcessMemoryPriority = 0;
+    public static int GetMemoryPriority(int pid) {
+        IntPtr h = OpenProcess(QUERY_LIMITED, false, pid);
+        if (h == IntPtr.Zero) return -1;
+        try { uint p = 0; return GetProcessInformation(h, ProcessMemoryPriority, ref p, 4) ? (int)p : -1; }
+        finally { CloseHandle(h); }
+    }
+    public static bool SetMemoryPriority(int pid, uint priority) {
+        IntPtr h = OpenProcess(SET_INFORMATION, false, pid);
+        if (h == IntPtr.Zero) return false;
+        try { uint p = priority; return SetProcessInformation(h, ProcessMemoryPriority, ref p, 4); }
+        finally { CloseHandle(h); }
+    }
+    public static bool Trim(int pid) {
+        IntPtr h = OpenProcess(SET_QUOTA | QUERY_INFORMATION, false, pid);
+        if (h == IntPtr.Zero) return false;
+        try { return EmptyWorkingSet(h); }
+        finally { CloseHandle(h); }
+    }
+}
+'@
+    }
+    $state = @{ plan = $null; dvr = @(); procs = @(); trimmed = 0 }
+    $freeBefore = [math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1KB)
+    # Power: from Balanced or Power saver to Ultimate or High performance.
+    $active = $null
+    $line0 = (powercfg /getactivescheme) 2>$null | Select-Object -First 1
+    if ($line0 -match '([0-9a-fA-F-]{36})') { $active = $Matches[1].ToLower() }
+    $plans = (powercfg /list) 2>$null
+    $target = @('e9a42b02-d5df-448d-aa00-03f14749eb61', '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c') | Where-Object { $plans -match $_ } | Select-Object -First 1
+    if ($target -and $active -and (@('381b4222-f694-41f0-9685-ff5bb260df2e', 'a1841308-3541-4fab-bc81-f71556f20b4a') -contains $active)) {
+        powercfg /setactive $target 2>$null | Out-Null
+        $state.plan = $active
+    }
+    # Game DVR's background recording off.
+    foreach ($k in @(@('HKCU:\System\GameConfigStore', 'GameDVR_Enabled'),
+            @('HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR', 'AppCaptureEnabled'),
+            @('HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR', 'HistoricalCaptureEnabled'))) {
+        $v = (Get-ItemProperty -Path $k[0] -Name $k[1] -ErrorAction SilentlyContinue).($k[1])
+        if ($v -eq 1) {
+            Set-ItemProperty -Path $k[0] -Name $k[1] -Value 0 -ErrorAction SilentlyContinue
+            $state.dvr += , $k
+        }
+    }
+    # Programs in the background: CPU below normal, memory priority low,
+    # their working sets handed back. The system's, the desktop's, sound,
+    # consoles and this launcher are left alone.
+    $keep = @('idle', 'system', 'registry', 'smss', 'csrss', 'wininit', 'winlogon', 'services', 'lsass', 'lsaiso',
+        'svchost', 'fontdrvhost', 'dwm', 'audiodg', 'explorer', 'sihost', 'ctfmon', 'taskhostw', 'runtimebroker',
+        'shellexperiencehost', 'startmenuexperiencehost', 'searchapp', 'searchui', 'searchhost', 'textinputhost',
+        'applicationframehost', 'lockapp', 'securityhealthsystray', 'securityhealthservice', 'msmpeng', 'conhost',
+        'openconsole', 'windowsterminal', 'powershell', 'pwsh', 'cmd', 'victory', 'nvdisplay.container',
+        'nvcontainer', 'wudfhost', 'dllhost', 'wmiprvse', 'spoolsv', 'memcompression')
+    $session = (Get-Process -Id $PID).SessionId
+    foreach ($p in Get-Process) {
+        if ($p.Id -le 4 -or $p.Id -eq $PID -or $p.SessionId -ne $session -or $keep -contains $p.ProcessName.ToLower()) { continue }
+        $class = $null
+        try { $class = $p.PriorityClass } catch { continue }
+        if ($null -eq $class) { continue }
+        $mem = [UpiPrepNative]::GetMemoryPriority($p.Id)
+        $start = $null
+        try { $start = $p.StartTime.Ticks } catch { }
+        $changed = $false
+        if ($class -eq 'Normal' -or $class -eq 'AboveNormal') {
+            try { $p.PriorityClass = 'BelowNormal'; $changed = $true } catch { }
+        }
+        if ($mem -gt 2 -and [UpiPrepNative]::SetMemoryPriority($p.Id, 2)) { $changed = $true }
+        if ($changed) { $state.procs += [pscustomobject]@{ id = $p.Id; name = $p.ProcessName; start = $start; class = "$class"; mem = $mem } }
+        if ([UpiPrepNative]::Trim($p.Id)) { $state.trimmed++ }
+    }
+    $freeAfter = [math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1KB)
+    Write-Host ("PC prepared (-NoPrep: not): power plan {0}, Game DVR {1}, {2} background programs lowered, {3} gave their RAM back; RAM free {4} -> {5} MB" -f `
+        $(if ($state.plan) { 'high performance' } else { 'as it was' }), $(if ($state.dvr.Count) { 'off' } else { 'as it was' }), $state.procs.Count, $state.trimmed, $freeBefore, $freeAfter)
+    $state
+}
+
+# Undoes Start-UpiPrep.
+function Stop-UpiPrep($state) {
+    $ErrorActionPreference = 'Continue'
+    if ($state.plan) { powercfg /setactive $state.plan 2>$null | Out-Null }
+    foreach ($k in $state.dvr) { Set-ItemProperty -Path $k[0] -Name $k[1] -Value 1 -ErrorAction SilentlyContinue }
+    foreach ($r in $state.procs) {
+        $p = Get-Process -Id $r.id -ErrorAction SilentlyContinue
+        if (-not $p -or $p.ProcessName -ne $r.name) { continue }
+        try { if ($r.start -and $p.StartTime.Ticks -ne $r.start) { continue } } catch { }
+        try { if ($p.PriorityClass -eq 'BelowNormal') { $p.PriorityClass = $r.class } } catch { }
+        if ($r.mem -ge 1) { [void][UpiPrepNative]::SetMemoryPriority($r.id, [uint32]$r.mem) }
+    }
+    Write-Host "PC preparation undone."
+}
+
 $logs = Join-Path $here 'logs'
 [IO.Directory]::CreateDirectory($logs) | Out-Null
 $log = Join-Path $logs ('run-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + ($mode -join '-') + '.log')
@@ -132,7 +249,15 @@ Write-Host "Log: $log"
 # file, without PowerShell rewrapping its lines.
 $cmd = Join-Path $env:SystemRoot 'System32\cmd.exe'
 $line = "/c `"`"$runtime`" run `"$game`" --execute --console $console >> `"$log`" 2>&1`""
-$process = Start-Process -FilePath $cmd -ArgumentList $line -WorkingDirectory $here -NoNewWindow -Wait -PassThru
+$prep = $null
+if (!$NoPrep) {
+    try { $prep = Start-UpiPrep } catch { Write-Warning "PC preparation skipped: $($_.Exception.Message)" }
+}
+try {
+    $process = Start-Process -FilePath $cmd -ArgumentList $line -WorkingDirectory $here -NoNewWindow -Wait -PassThru
+} finally {
+    if ($prep) { try { Stop-UpiPrep $prep } catch { Write-Warning "PC preparation not fully undone: $($_.Exception.Message)" } }
+}
 Write-Host "The game ended (exit code $($process.ExitCode)). Log: $log"
 if ($process.ExitCode -ne 0) {
     Read-Host 'Press Enter to close' | Out-Null

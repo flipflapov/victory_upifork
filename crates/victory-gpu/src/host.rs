@@ -3920,6 +3920,7 @@ fn late_line(frames: f64) {
     }
     card_steps::log(frames);
     crate::port::log(frames);
+    crate::smart_back::log_stats(frames);
     crate::port_cbv::log(frames);
     crate::watch::port_guard_line(frames);
     crate::port_journal::line(frames);
@@ -4714,6 +4715,11 @@ impl Host {
         // results go behind those of plans still in the air.
         let mut at = work.taken;
         for (shadow, ranges) in &declared {
+            // (`VICTORY_SMART_COPY_BACK`: big copies stay on the card until
+            // the title reads them through a copy or fill)
+            if !crate::smart_back::should_copy_back(shadow) {
+                continue;
+            }
             let mut sorted = ranges.clone();
             sorted.sort_unstable();
             let mut spans: Vec<(usize, usize)> = Vec::new();
@@ -5181,7 +5187,7 @@ impl Host {
                 // (Each byte once: the ranges are joined.)
                 let mut back: Vec<Declared> = Vec::new();
                 for flight in &flights {
-                    for (shadow, ranges) in flight.back.iter().filter(|(shadow, _)| !shadow.carded()) {
+                    for (shadow, ranges) in flight.back.iter().filter(|(shadow, _)| !shadow.carded() && crate::smart_back::should_copy_back(shadow)) {
                         match back.iter_mut().find(|(s, _)| std::sync::Arc::ptr_eq(s, shadow)) {
                             Some((_, all)) => all.extend_from_slice(ranges),
                             None => back.push((shadow.clone(), ranges.clone())),
@@ -5680,7 +5686,7 @@ impl Host {
                     if let Some(card) = &flight.card {
                         self.card_back(card, submitted, &mut seen);
                     }
-                    for (shadow, ranges) in &flight.back {
+                    for (shadow, ranges) in flight.back.iter().filter(|(shadow, _)| crate::smart_back::should_copy_back(shadow)) {
                         match back.iter_mut().find(|(s, _)| std::sync::Arc::ptr_eq(s, shadow)) {
                             Some((_, all)) => {
                                 for range in ranges {
@@ -6207,7 +6213,10 @@ impl Host {
         if let Some(card) = &card {
             self.card_back(card, &mut submitted, &mut std::collections::HashSet::new());
         }
-        let back = crate::picked::with(declared, &picked.written);
+        let back: Vec<Declared> = crate::picked::with(declared, &picked.written)
+            .into_iter()
+            .filter(|(shadow, _)| crate::smart_back::should_copy_back(shadow))
+            .collect();
         hand_back(&back);
         if let Some(card) = card {
             self.card_done(card);
@@ -7197,6 +7206,7 @@ impl HostList {
         deferred
             .copies
             .push(Step::Copy(dst as usize, src as usize, len));
+        crate::smart_back::note_cpu_read(src as usize, len);
         deferred.title_written();
         self.changed_something();
     }
@@ -7207,6 +7217,7 @@ impl HostList {
         self.deferred()
             .copies
             .push(Step::Fill(dst as usize, src as usize, len, None));
+        crate::smart_back::note_cpu_read(src as usize, len);
     }
 
     /// The host address of `len` bytes of scratch memory that hold the title
