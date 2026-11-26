@@ -116,9 +116,8 @@ if ($Turbo -and !$Safe) {
     # driver offer it (a resizable BAR); else as before. They stop going
     # there at 80 % of the card's budget.
     $settings['VICTORY_WINDOWS_BAR_MB'] = '2048'
-    # Six threads landing what shaders wrote (three by default on 12 logical
-    # processors): they wait on title memory that pages.
-    $settings['VICTORY_LAND_THREADS'] = '6'
+    # (VICTORY_LAND_THREADS=6 was tried in run 2026-11-26 23:30: the landings
+    # took as long as with the default 3, waiting on title memory that pages.)
     # (Neptune by Dolberth's smart copy-back, VICTORY_SMART_COPY_BACK=1, is
     # not set: in run 2026-11-26 22:10 it cut copying back from ~50 to ~7 ms
     # a frame and the frame rate not at all, and faces came out crumpled:

@@ -346,14 +346,19 @@ fn feature_levels(data: *mut c_void) -> HRESULT {
     }
 }
 
-/// Device methods 0x1c8 and 0x218 (`SLOT`). The title calls both
-/// (title+0x2477578 and title+0x24800d5) as `(this, description, interface
-/// id, out)`, asks for `ID3D12PipelineState`, and on success keeps the
-/// object `out` names and draws with it; on failure it goes without that
-/// pipeline, silently. What the descriptions hold is not known: the calls
-/// fail as they always did, with `out` null, and the first ones log the
-/// description's words and what its first word points at, so that the two
-/// methods can be written.
+/// Device methods 0x1c8 and 0x218 (`SLOT`): `DeserializePipelineStateX`, a
+/// graphics and a compute pipeline out of the console driver's own pipeline
+/// cache (as XCL's notes name slots #57 and #67, read in
+/// zortos293/XSEmu's HANDOFF.md; no code of it is here: GPL-2.0-only). The
+/// title calls both (title+0x2477578 and title+0x24800d5) as `(this,
+/// description, interface id, out)`; the description is `{ root signature
+/// @0; parts { pointer; length }[] @8 }`, which the blobs logged with
+/// `VICTORY_BLOBS_LOG=1` show: a DXBC container with the root signature
+/// (RTS0), then the console GPU's machine code and its register metadata
+/// per stage. A failure is a cache miss: the title then makes the pipeline
+/// from its shaders as usual (its draws are not lost), so failing is right
+/// until the console driver's format is read (it would only save the
+/// pipelines' first making).
 /// shortcut: not implemented. Answering `S_OK` here without making the
 /// pipeline would hand the title whatever its stack held as an object.
 extern "system" fn unknown_pipeline<const SLOT: usize>(
@@ -388,12 +393,12 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
         let first = description
             .as_ref()
             .and_then(|w| words(w[0] as usize));
-        tracing::warn!(
+        tracing::info!(
             slot = format_args!("{:#x}", SLOT),
             calls,
             description = format_args!("{description:x?}"),
             first_points_at = format_args!("{first:x?}"),
-            "a pipeline creation method that is not implemented: the title goes without this pipeline"
+            "DeserializePipelineStateX (the console driver's pipeline cache) is not read: a cache miss, the title makes the pipeline as usual"
         );
         #[cfg(windows)]
         if calls <= 2 {
