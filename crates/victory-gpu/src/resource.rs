@@ -3593,7 +3593,7 @@ mod tests {
         let srv = [3, 0, 0, 0, 4, 0, 4, 0x1_0001, 67, 1, 0, 0, 0, 0];
         let uav = uav_texture_at(address, &srv, 42).unwrap();
         let view = texture_at(address, &srv).unwrap();
-        assert_eq!(alias_of(view), Some(uav));
+        assert_eq!(alias_of(view).map(|h| h.get()), Some(uav));
 
         // The title uses the storage temporarily for a different shape.
         let mut other = texture(8, 4, 42, 1);
@@ -3616,7 +3616,7 @@ mod tests {
         let temporary_view = texture_at(address, &temporary_srv).unwrap();
         assert_eq!(uav_texture_at(address, &srv, 42), Some(uav));
         assert_eq!(
-            alias_of(temporary_view),
+            alias_of(temporary_view).map(|h| h.get()),
             Some(target),
             "keep the active target"
         );
@@ -3624,7 +3624,7 @@ mod tests {
 
         // Mirror the original placed UAV again, then resolve its paired SRV.
         assert_eq!(uav_texture_at(address, &srv, 42), Some(uav));
-        assert_eq!(alias_of(view), Some(uav), "restore the cached target");
+        assert_eq!(alias_of(view).map(|h| h.get()), Some(uav), "restore the cached target");
     }
 
     fn buffer(width: u64) -> ResourceDesc {

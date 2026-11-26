@@ -6652,8 +6652,8 @@ mod bake_flip_tests {
         super::super::create_placed_uav(std::ptr::null(), &vol_res, &vol_uav, slot_handle);
         assert!(heap.mirror(0, slot_handle, false).is_some());
         {
-            let kept = heap.kept.lock().unwrap();
-            let tex = kept[0].as_ref().expect("3D placed UAV must mirror immediately");
+            let kept = heap.kept[0].lock().unwrap();
+            let tex = kept.as_ref().expect("3D placed UAV must mirror immediately");
             // SAFETY: live D3D12 resource.
             let d = unsafe { tex.GetDesc() };
             assert_eq!(d.Dimension, D3D12_RESOURCE_DIMENSION_TEXTURE3D);
@@ -6703,7 +6703,7 @@ mod bake_flip_tests {
         };
         assert!(make(&srv_placed, heap.cpu(2)).flatten().is_some());
         assert_eq!(
-            crate::resource::alias_of(srv_obj as crate::object::This),
+            crate::resource::alias_of(srv_obj as crate::object::This).map(|h| h.get()),
             Some(uav_obj as crate::object::This),
             "placed SRV must find the placed UAV texture in TARGETS_AT"
         );
