@@ -339,6 +339,8 @@ fn for_rays(bytes: &[u8]) -> RayOnly {
         RayOnly::Activate
     } else if (has(b"CS_ScreenProbes_TraceRays") && has(b"_BVH")) || (has(b"CS_RaytraceVBuffer") && !has(b"Voxels")) {
         RayOnly::Trace
+    } else if has(b"CS_GenerateShadowMasks_Raytraced") || has(b"CS_RTShadowTrace") || has(b"CS_RaytraceShadows") {
+        RayOnly::ShadowMask
     } else {
         RayOnly::No
     }
@@ -353,6 +355,7 @@ enum RayOnly {
     Resolve,
     Activate,
     Trace,
+    ShadowMask,
 }
 
 #[cfg(all(test, windows))]
@@ -387,6 +390,7 @@ pub(crate) fn skips_rt_skin(this: This) -> bool {
     static RESOLVE: OnceLock<bool> = OnceLock::new();
     static ACTIVATE: OnceLock<bool> = OnceLock::new();
     static TRACE: OnceLock<bool> = OnceLock::new();
+    static SHADOW: OnceLock<bool> = OnceLock::new();
     if this.is_null() {
         return false;
     }
@@ -396,6 +400,10 @@ pub(crate) fn skips_rt_skin(this: This) -> bool {
         RayOnly::Resolve => *RESOLVE.get_or_init(|| off("VICTORY_RT_RESOLVE")),
         RayOnly::Activate => *ACTIVATE.get_or_init(|| off("VICTORY_ACTIVATE_RAYS")),
         RayOnly::Trace => *TRACE.get_or_init(|| off("VICTORY_RT_TRACE")),
+        // (opt-in while it is tried: `VICTORY_SKIP_RT_SHADOW=1`)
+        RayOnly::ShadowMask => *SHADOW.get_or_init(|| {
+            std::env::var_os("VICTORY_SKIP_RT_SHADOW").is_some_and(|v| v == "1") && off("VICTORY_RT_SHADOW")
+        }),
     }
 }
 
