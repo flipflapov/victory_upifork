@@ -84,6 +84,23 @@ pub(crate) fn on() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_POOL").is_none_or(|v| v != "0"))
 }
 
+/// Whether small textures may lie at multiples of 4 KiB in their block
+/// (`VICTORY_POOL_SMALL=0`: not, at 64 KiB as every other texture).
+///
+/// Upstream made this opt-in after tracing two device losses of the night of
+/// 2026-11-25 to 256x256 block-compressed textures placed at a 4 KiB multiple.
+/// This tree, from codec-d/cool_fox, places them that way already and did not
+/// lose the device with it in 357 frames, so the default follows this tree and
+/// the switch is the way out if a device loss ever names such a texture.
+fn small_placement() -> bool {
+    #[cfg(feature = "diagnostics")]
+    if let Some(on) = crate::ab::pick("VICTORY_POOL_SMALL") {
+        return on;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_POOL_SMALL").is_none_or(|v| v != "0"))
+}
+
 /// How many blocks of textures are made ahead, so that one has been there
 /// for a while when its first piece is taken (`VICTORY_RIPE_BLOCKS`, 12;
 /// 0: none, and new blocks are used at once, as before).
@@ -507,11 +524,12 @@ pub(crate) unsafe fn texture(
     if !on() {
         return None;
     }
-    // Small textures lie at multiples of 4 KiB where the host allows it
-    // (the top mip is 64 KiB at most): 64 KiB each otherwise.
+    // Small textures lie at multiples of 4 KiB where the host allows it and
+    // [`small_placement`] says so (the top mip is 64 KiB at most): 64 KiB
+    // each otherwise.
     // SAFETY: the caller's description.
     let mut d = unsafe { *desc };
-    d.Alignment = u64::from(D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT);
+    d.Alignment = if small_placement() { u64::from(D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT) } else { 0 };
     // SAFETY: plain queries.
     let mut info = unsafe { device.GetResourceAllocationInfo(0, &[d]) };
     if info.SizeInBytes == u64::MAX || info.Alignment != d.Alignment {
