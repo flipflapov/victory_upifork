@@ -988,6 +988,67 @@ pub(crate) static PREPARING: [std::sync::atomic::AtomicU64; 4] = [
 /// memory) and the graphics card's own (indirect arguments, twins' copies).
 /// For the memory line: against what is alive, they show what was let go.
 pub(crate) static MADE: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
+/// Nanoseconds of making the buffers [`MADE`] counts (creation, residency,
+/// mapping), by the same kinds: upload, shared, the card's.
+static MADE_NS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+/// [`MADE`] at the last [`made_line`].
+static MADE_SAID: Mutex<[u64; 6]> = Mutex::new([0; 6]);
+/// Buffers refused for want of memory since the last [`made_line`], by kind
+/// (upload, shared, read-back), and the warnings left out of the log for it.
+static REFUSED: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+/// A buffer of `kind` ("upload", ...) refused: said at most once a second.
+/// (Run 2026-11-27 16:11-16:15, 16 GB, the PC's memory the card may hold
+/// spent: 135,000 such lines in four minutes, each with its error's text
+/// looked up anew.)
+fn buffer_refused(which: usize, kind: &str, error: &windows::core::Error, size: u64) {
+    static SAID_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    REFUSED[which].fetch_add(1, Ordering::Relaxed);
+    let now = coarse_ms();
+    let said = SAID_AT.load(Ordering::Relaxed);
+    if (said == 0 || now >= said + 1000)
+        && SAID_AT.compare_exchange(said, now.max(1), Ordering::Relaxed, Ordering::Relaxed).is_ok()
+    {
+        let left_out = REFUSED[3].swap(0, Ordering::Relaxed);
+        tracing::warn!(error = %error, size, left_out, "no {kind} buffer (at most one such line a second; left_out: since the last)");
+    } else {
+        REFUSED[3].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Host buffers made per frame over `frames`, by kind, and what making them
+/// took (creation, residency, mapping): on the threads that need them, the
+/// translating ones among them. Run 2026-11-27 (16 GB): about 1,000 a
+/// second waited for residency alone, 180 ms a second.
+pub(crate) fn made_line(frames: f64) {
+    if frames <= 0.0 {
+        return;
+    }
+    let now: [u64; 6] = std::array::from_fn(|i| MADE[i].load(Ordering::Relaxed));
+    let was = std::mem::replace(&mut *MADE_SAID.lock().unwrap_or_else(|e| e.into_inner()), now);
+    let ns: [u64; 3] = std::array::from_fn(|i| MADE_NS[i].swap(0, Ordering::Relaxed));
+    let refused: [u64; 3] = std::array::from_fn(|i| REFUSED[i].swap(0, Ordering::Relaxed));
+    let n = |i: usize| now[i].saturating_sub(was[i]) as f64 / frames;
+    if n(0) + n(2) + n(4) == 0.0 && refused.iter().all(|&r| r == 0) {
+        return;
+    }
+    tracing::info!(
+        "host buffers made per frame: upload {:.1} ({:.1} MB, {:.1} ms), shared with the CPU {:.1} ({:.1} MB, {:.1} ms), the card's \
+         {:.1} ({:.1} MB, {:.1} ms); refused for want of memory: upload {:.1}, shared {:.1}, read-back {:.1}",
+        n(0),
+        n(1) / 1e6,
+        ns[0] as f64 / 1e6 / frames,
+        n(2),
+        n(3) / 1e6,
+        ns[1] as f64 / 1e6 / frames,
+        n(4),
+        n(5) / 1e6,
+        ns[2] as f64 / 1e6 / frames,
+        refused[0] as f64 / frames,
+        refused[1] as f64 / frames,
+        refused[2] as f64 / frames,
+    );
+}
 
 /// What of that is alive now, for the memory line (`MADE` counts what was
 /// ever made: 42,607 upload buffers, 77.9 GB, in five minutes of run 60,
@@ -9549,7 +9610,7 @@ impl Host {
         match made {
             Ok(()) => buffer,
             Err(e) => {
-                tracing::warn!(error = %e, size, "no read-back buffer");
+                buffer_refused(2, "read-back", &e, size);
                 None
             }
         }
@@ -9559,6 +9620,7 @@ impl Host {
     pub(crate) fn upload_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
         MADE[0].fetch_add(1, Ordering::Relaxed);
         MADE[1].fetch_add(size, Ordering::Relaxed);
+        let began = std::time::Instant::now();
         let heap = D3D12_HEAP_PROPERTIES {
             Type: D3D12_HEAP_TYPE_UPLOAD,
             ..Default::default()
@@ -9595,6 +9657,7 @@ impl Host {
                     b.Map(0, None, Some(&mut data))
                 })
         };
+        MADE_NS[0].fetch_add(began.elapsed().as_nanos() as u64, Ordering::Relaxed);
         #[cfg(feature = "diagnostics")]
         if made.is_ok()
             && let Some(b) = &buffer
@@ -9605,7 +9668,7 @@ impl Host {
             Ok(()) => Some((buffer?, data.cast())),
             Err(e) => {
                 crate::residency::allocation_error(&e);
-                tracing::warn!(error = %e, size, "no upload buffer");
+                buffer_refused(0, "upload", &e, size);
                 None
             }
         }
@@ -10609,6 +10672,7 @@ impl Host {
     pub(crate) fn shared_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
         MADE[2].fetch_add(1, Ordering::Relaxed);
         MADE[3].fetch_add(size, Ordering::Relaxed);
+        let began = std::time::Instant::now();
         let heap = D3D12_HEAP_PROPERTIES {
             Type: D3D12_HEAP_TYPE_CUSTOM,
             CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_WRITE_BACK,
@@ -10649,6 +10713,7 @@ impl Host {
                     b.Map(0, None, Some(&mut data))
                 })
         };
+        MADE_NS[1].fetch_add(began.elapsed().as_nanos() as u64, Ordering::Relaxed);
         #[cfg(feature = "diagnostics")]
         if made.is_ok()
             && let Some(b) = &buffer
@@ -10658,7 +10723,7 @@ impl Host {
         match made {
             Ok(()) => Some((buffer?, data.cast())),
             Err(e) => {
-                tracing::warn!(error = %e, size, "no shared buffer");
+                buffer_refused(1, "shared", &e, size);
                 None
             }
         }
@@ -10752,6 +10817,7 @@ impl Host {
     pub(crate) fn uav_buffer(&self, size: u64) -> Option<ID3D12Resource> {
         MADE[4].fetch_add(1, Ordering::Relaxed);
         MADE[5].fetch_add(size, Ordering::Relaxed);
+        let began = std::time::Instant::now();
         let heap = D3D12_HEAP_PROPERTIES {
             Type: D3D12_HEAP_TYPE_DEFAULT,
             ..Default::default()
@@ -10787,6 +10853,7 @@ impl Host {
             crate::book::made(b, || "an unordered access buffer".into());
         }
         let made = made.and_then(|()| buffer.as_ref().map_or(Ok(()), |b| resident(&self.device, b))).and_then(|()| mapped(&self.device));
+        MADE_NS[2].fetch_add(began.elapsed().as_nanos() as u64, Ordering::Relaxed);
         match made {
             Ok(()) => buffer,
             Err(e) => {

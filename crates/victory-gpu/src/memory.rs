@@ -946,7 +946,10 @@ pub(crate) fn ready(
     use_: Use,
     threads: Option<[u32; 3]>,
 ) -> Option<Ready> {
+    let asked = std::time::Instant::now();
     let mut guard = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
+    crate::draw::prep::count(crate::draw::prep::MEMORY_ASKS, 1);
+    crate::draw::prep::step(crate::draw::prep::MEMORY_LOCK, asked);
     if guard.is_none() {
         *guard = Memory::new();
     }

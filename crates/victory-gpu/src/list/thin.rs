@@ -170,6 +170,48 @@ static BACKS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 /// the microseconds that took (all threads), recordings translated, and
 /// recordings let go of in the middle.
 static CHUNKS: AtomicU64 = AtomicU64::new(0);
+/// Of translating: the CPU cycles the threads ran in it (user and kernel
+/// mode), and the nanoseconds it took; against the time stamp counter's
+/// rate, the share of the translating threads' time on a CPU. The rest they
+/// waited: for locks, for pages read back from the page file, in the
+/// kernel. (Run 2026-11-27 16:15, 16 GB: 8 threads, 6-9 s of translating
+/// a frame, 550-850 us an indirect execution, and nothing told work from
+/// waiting.)
+static RAN: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+/// The time stamp counter and the clock at the last line.
+static TSC_AT: Mutex<Option<(u64, std::time::Instant)>> = Mutex::new(None);
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn QueryThreadCycleTime(thread: *mut std::ffi::c_void, cycles: *mut u64) -> i32;
+}
+
+/// The cycles this thread has run (0 where that is not known).
+#[inline]
+fn thread_cycles() -> u64 {
+    #[cfg(windows)]
+    {
+        let mut cycles = 0u64;
+        // SAFETY: the pseudo handle of the calling thread; an out pointer.
+        unsafe { QueryThreadCycleTime(-2isize as *mut std::ffi::c_void, &mut cycles) };
+        cycles
+    }
+    #[cfg(not(windows))]
+    0
+}
+
+/// The time stamp counter.
+#[inline]
+fn tsc() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: every x86-64 processor has it.
+    unsafe {
+        std::arch::x86_64::_rdtsc()
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    0
+}
 static STATS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 /// Since the last line, by the code of the call: nanoseconds translating
 /// calls of it on our threads, and the calls ([`translate`], [`line`]).
@@ -390,6 +432,34 @@ pub(crate) fn line(frames: f64) {
         CHUNKS.swap(0, Relaxed) as f64 / frames,
         s[3]
     );
+    // On a CPU or waiting: the cycles they ran against the counter's rate
+    // (the thread cycle time counts in its ticks).
+    let (cycles, ns) = (RAN[0].swap(0, Relaxed), RAN[1].swap(0, Relaxed));
+    let (now_tsc, now) = (tsc(), std::time::Instant::now());
+    let rate = {
+        let mut at = TSC_AT.lock().unwrap_or_else(|e| e.into_inner());
+        let rate = at.and_then(|(t, i)| {
+            let ns = now.duration_since(i).as_nanos() as f64;
+            (ns > 1e8 && now_tsc > t).then(|| (now_tsc - t) as f64 / ns)
+        });
+        *at = Some((now_tsc, now));
+        rate
+    };
+    if let Some(rate) = rate
+        && ns > 0
+        && cycles > 0
+    {
+        let on_cpu = cycles as f64 / rate;
+        tracing::info!(
+            "of translating lists, per frame: {:.1} ms on a CPU of {:.1} ms (all threads, {:.0} %; counter {:.2} GHz), the rest {:.1} ms \
+             waiting (locks, pages read back from the page file, the kernel)",
+            on_cpu / 1e6 / frames,
+            ns as f64 / 1e6 / frames,
+            100.0 * on_cpu / ns as f64,
+            rate,
+            (ns as f64 - on_cpu).max(0.0) / 1e6 / frames,
+        );
+    }
     // What the calls cost by kind, the most first: where translating a frame's
     // lists goes (2.2-3.4 s of all threads a frame in run 2026-11-27 18:45).
     let mut by: Vec<(usize, u64, u64)> =
@@ -731,7 +801,10 @@ extern "system" fn copy_texture_region_x(
 fn translate(list: This, stream: &[u64], left: impl Fn() -> bool) -> (u64, bool) {
     // (by call code: nanoseconds and calls, added to [`BY_OP`] once a chunk)
     let mut costs = [[0u64; 2]; OPS];
+    let (cycles, began) = (thread_cycles(), std::time::Instant::now());
     let r = translate_timed(list, stream, left, &mut costs);
+    RAN[0].fetch_add(thread_cycles().wrapping_sub(cycles), Relaxed);
+    RAN[1].fetch_add(began.elapsed().as_nanos() as u64, Relaxed);
     for (total, mine) in BY_OP.iter().zip(&costs) {
         if mine[1] > 0 {
             total[0].fetch_add(mine[0], Relaxed);

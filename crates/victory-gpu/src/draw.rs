@@ -1566,6 +1566,7 @@ impl State {
         if !self.bind(list, p, false) {
             return false;
         }
+        let mut at = std::time::Instant::now();
         let l = &list.list;
         // Vertex buffers the input layout reads.
         let mut views = [D3D12_VERTEX_BUFFER_VIEW::default(); 32];
@@ -1608,6 +1609,7 @@ impl State {
             // SAFETY: an open list; the view names a live host buffer.
             unsafe { l.IASetIndexBuffer(Some(&view)) };
         }
+        at = prep::step(prep::BUFFERS, at);
         const RENDER_TARGET: u32 = 0x4;
         for &t in &self.targets {
             crate::list::ensure_state(list, t as This, RENDER_TARGET);
@@ -1632,6 +1634,7 @@ impl State {
             };
             crate::list::ensure_state(list, self.depth as This, state);
         }
+        prep::step(prep::STATES, at);
         true
     }
 
@@ -1644,11 +1647,14 @@ impl State {
     /// could not be given a view.
     pub(crate) fn bind(&mut self, list: &HostList, p: &HostPipeline, compute: bool) -> bool {
         let l = &list.list;
+        prep::count(prep::BINDS, 1);
+        let mut at = std::time::Instant::now();
         // Textures picked by index, before anything asks for them.
         self.early_textures(list, p, compute);
         if crate::host::walls_trace() {
             self.walls_census(p, compute);
         }
+        at = prep::step(prep::EARLY, at);
         // A list without a view heap: one of the title's for the views the
         // host itself puts into heap slots.
         if self.heaps[0] == 0
@@ -1728,6 +1734,7 @@ impl State {
             // The title may release the pipeline before it submits the list.
             list.bind_pipeline(&p.name, &p.pso, &p.root);
         }
+        at = prep::step(prep::SETUP, at);
         // Stages reading different lengths of the same native table share
         // its largest snapshot. Resource readiness remains stage-specific.
         let extents = if p.stages.len() > 1 {
@@ -1735,13 +1742,17 @@ impl State {
         } else {
             Few::default()
         };
+        at = prep::step(prep::EXTENTS, at);
         for stage in &p.stages {
             let t = stage.translated();
             STORES.set(t.stores);
             if t.stores && crate::picked::on() && crate::picked::picks(&stage.shader, &t.picks) {
                 crate::picked::runs_in(list);
             }
+            prep::step(prep::SETUP, at);
+            // (It counts its own steps.)
             let made = self.tables_with_extents(list, &t.tables, compute, &extents);
+            at = std::time::Instant::now();
             STORES.set(true);
             if made.iter().any(|m| m.1 == u32::MAX) {
                 once!("a draw whose descriptor table found no free slots is dropped");
@@ -1772,6 +1783,7 @@ impl State {
             } else {
                 None
             };
+            at = prep::step(prep::MEMORY, at);
             if let Some((param, dwords)) = stage.user_data {
                 // (A root signature holds 64 dwords.)
                 let mut room = [0u32; 64];
@@ -1811,6 +1823,7 @@ impl State {
                     }
                 }
             }
+            at = prep::step(prep::USER, at);
             for (views, srv) in [(&stage.root_cbvs, false), (&stage.root_srvs, true)] {
                 for &(slot, param) in views {
                     if srv && slot == victory_shader::emit::SLOT_MEMORY {
@@ -1908,6 +1921,7 @@ impl State {
                     }
                 }
             }
+            at = prep::step(prep::ROOTS, at);
             for &(slot, param) in &stage.root_uavs {
                 if slot == victory_shader::emit::SLOT_FAULTS {
                     // Ours: where shaders note the pages they found empty.
@@ -1935,10 +1949,12 @@ impl State {
                     return false;
                 }
             }
+            at = prep::step(prep::UAVS, at);
         }
         // Depth textures it writes through unordered access: their colour
         // twins hold what they lack from here on.
         list.twins_written();
+        prep::step(prep::TWINS, at);
         true
     }
 
@@ -3772,6 +3788,7 @@ impl State {
         compute: bool,
         extents: &[(u8, u32)],
     ) -> Few<(u8, u32), 16> {
+        let mut at = std::time::Instant::now();
         let mut fresh = [0u64; 4];
         let selected_slot = |mask: &[u64; 4], slot: u8| mask[usize::from(slot / 64)] & (1u64 << (slot % 64)) != 0;
         for group in &plan.groups {
@@ -3786,12 +3803,16 @@ impl State {
                 self.table_entry(list, &group.entries[e], compute);
             }
         }
+        prep::step(prep::DIRECT, at);
         let mut made = Few::default();
         for group in &plan.groups {
             let slot = group.slot;
             if !selected_slot(&fresh, slot) {
                 continue;
             }
+            prep::count(prep::FRESH, 1);
+            // (What a group takes until it is known or made: its hash.)
+            at = std::time::Instant::now();
             let Some(&Root::Table(table)) = self.roots_ref(compute).get(usize::from(slot)) else {
                 continue;
             };
@@ -3831,6 +3852,8 @@ impl State {
                 }
                 (table, n, h.0)
             };
+            prep::count(prep::HASHED, u64::from(n));
+            at = prep::step(prep::HASH, at);
             // Who reads of it, and as what, as far as [`readable`] goes by it.
             let reader = (std::ptr::from_ref(plan) as usize, plan.direct.len(), STORES.get(), TESTED_DEPTH.get().0);
             if let Some(known) = self.fresh_tables.get_mut(&key) {
@@ -3846,8 +3869,11 @@ impl State {
                         TESTED_DEPTH.set((reader.3, true));
                     }
                     made.push((slot, first * 32));
+                    prep::count(prep::KNOWN_LEFT, 1);
+                    prep::step(prep::KNOWN, at);
                     continue;
                 }
+                prep::count(prep::KNOWN_WALKED, 1);
                 let depth_before = TESTED_DEPTH.get();
                 TESTED_DEPTH.set((depth_before.0, false));
                 let title_first = heap.index(table).filter(|first| first + own_count <= host.count());
@@ -3901,8 +3927,11 @@ impl State {
                     }
                 }
                 made.push((slot, first * 32));
+                prep::step(prep::KNOWN, at);
                 continue;
             }
+            prep::count(prep::MADE, 1);
+            prep::count(prep::MADE_ENTRIES, u64::from(n));
             let Some(first) = host.dynamic(n).or_else(|| {
                 crate::host::settle_for_fence();
                 host.dynamic(n)
@@ -3978,6 +4007,7 @@ impl State {
                     if was != (listed.ready, listed.tabled) {
                         crate::descriptor::host::note_listed(recording, words, listed);
                     }
+                    prep::count(prep::LISTED, 1);
                     continue;
                 }
                 let used = group.entry(k);
@@ -4037,6 +4067,7 @@ impl State {
                 }
             }
             made.push((slot, first * 32));
+            prep::step(prep::NEW, at);
         }
         made
     }
@@ -4664,6 +4695,168 @@ pub(crate) fn indirect_cost_line(frames: f64) {
     );
 }
 
+/// Where preparing draws and dispatches goes ([`State::bind`] and
+/// [`State::prepare_for`]), on the threads that translate lists: per step,
+/// in nanoseconds, said with the frame line. Run 2026-11-27 16:15 (16 GB):
+/// indirect executions alone took 300-900 us each to prepare, whatever the
+/// page faults, and nothing said which step.
+pub(crate) mod prep {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
+
+    pub(crate) const EARLY: usize = 0;
+    pub(crate) const SETUP: usize = 1;
+    pub(crate) const EXTENTS: usize = 2;
+    pub(crate) const HASH: usize = 3;
+    pub(crate) const KNOWN: usize = 4;
+    pub(crate) const NEW: usize = 5;
+    pub(crate) const DIRECT: usize = 6;
+    pub(crate) const MEMORY: usize = 7;
+    pub(crate) const USER: usize = 8;
+    pub(crate) const ROOTS: usize = 9;
+    pub(crate) const UAVS: usize = 10;
+    pub(crate) const TWINS: usize = 11;
+    pub(crate) const BUFFERS: usize = 12;
+    pub(crate) const STATES: usize = 13;
+    /// Inside the steps above (not added to them): [`super::readable`],
+    /// of it the texture uploads asked for, the lock of title memory by
+    /// address waited for, a dynamic slot range waited for.
+    pub(crate) const READABLE: usize = 14;
+    pub(crate) const UPLOADS: usize = 15;
+    pub(crate) const MEMORY_LOCK: usize = 16;
+    pub(crate) const STEPS: usize = 17;
+    const NAMES: [&str; 14] = [
+        "textures picked early",
+        "heaps, root signature and pipeline",
+        "shared table extents",
+        "tables: their records hashed",
+        "tables: known ones brought up to date",
+        "tables: made anew",
+        "tables: entries named alone",
+        "title memory by address",
+        "user data",
+        "root views",
+        "root unordered views",
+        "twins written",
+        "vertex and index buffers",
+        "targets' and depth's states",
+    ];
+
+    pub(crate) const BINDS: usize = 0;
+    pub(crate) const FRESH: usize = 1;
+    pub(crate) const KNOWN_LEFT: usize = 2;
+    pub(crate) const KNOWN_WALKED: usize = 3;
+    pub(crate) const MADE: usize = 4;
+    pub(crate) const MADE_ENTRIES: usize = 5;
+    pub(crate) const LISTED: usize = 6;
+    pub(crate) const HASHED: usize = 7;
+    pub(crate) const READABLES: usize = 8;
+    pub(crate) const MEMORY_ASKS: usize = 9;
+    pub(crate) const COUNTS: usize = 10;
+
+    static NS: [AtomicU64; STEPS] = [const { AtomicU64::new(0) }; STEPS];
+    static N: [AtomicU64; COUNTS] = [const { AtomicU64::new(0) }; COUNTS];
+
+    /// A thread's sums, added to [`NS`] and [`N`] every [`FLUSH`] binds:
+    /// eight threads adding to the same few lines tens of thousands of
+    /// times a frame would wait for each other.
+    struct Local {
+        ns: [u64; STEPS],
+        n: [u64; COUNTS],
+        binds: u32,
+    }
+    const FLUSH: u32 = 32;
+
+    thread_local! {
+        static LOCAL: std::cell::RefCell<Local> =
+            const { std::cell::RefCell::new(Local { ns: [0; STEPS], n: [0; COUNTS], binds: 0 }) };
+    }
+
+    fn flush(l: &mut Local) {
+        for (sum, mine) in NS.iter().zip(&mut l.ns) {
+            if *mine > 0 {
+                sum.fetch_add(std::mem::take(mine), Ordering::Relaxed);
+            }
+        }
+        for (sum, mine) in N.iter().zip(&mut l.n) {
+            if *mine > 0 {
+                sum.fetch_add(std::mem::take(mine), Ordering::Relaxed);
+            }
+        }
+        l.binds = 0;
+    }
+
+    /// `step` took from `from` to now; now, for the next step.
+    #[inline]
+    pub(crate) fn step(step: usize, from: Instant) -> Instant {
+        let now = Instant::now();
+        let ns = now.duration_since(from).as_nanos() as u64;
+        let _ = LOCAL.try_with(|l| {
+            if let Ok(mut l) = l.try_borrow_mut() {
+                l.ns[step] += ns;
+            }
+        });
+        now
+    }
+
+    #[inline]
+    pub(crate) fn count(what: usize, n: u64) {
+        let _ = LOCAL.try_with(|l| {
+            if let Ok(mut l) = l.try_borrow_mut() {
+                l.n[what] += n;
+                if what == BINDS {
+                    l.binds += 1;
+                    if l.binds >= FLUSH {
+                        flush(&mut l);
+                    }
+                }
+            }
+        });
+    }
+
+    /// With the frame line, per frame over `frames`.
+    pub(crate) fn line(frames: f64) {
+        let ns: Vec<u64> = NS.iter().map(|a| a.swap(0, Ordering::Relaxed)).collect();
+        let n: Vec<u64> = N.iter().map(|a| a.swap(0, Ordering::Relaxed)).collect();
+        if n[BINDS] == 0 || frames <= 0.0 {
+            return;
+        }
+        let ms = |i: usize| ns[i] as f64 / 1e6 / frames;
+        let per = |i: usize| n[i] as f64 / frames;
+        let all: u64 = ns[..NAMES.len()].iter().sum();
+        let mut steps: Vec<(usize, u64)> = (0..NAMES.len()).map(|i| (i, ns[i])).collect();
+        steps.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        let text: Vec<String> = steps
+            .iter()
+            .filter(|(_, ns)| *ns > 0)
+            .map(|&(i, _)| format!("{} {:.1} ms", NAMES[i], ms(i)))
+            .collect();
+        tracing::info!(
+            "draws and dispatches prepared per frame (all threads translating lists): {:.0} in {:.1} ms ({:.0} us each), the costliest \
+             step first: {}; inside them: made readable {:.1} ms ({:.0} times), of it texture uploads asked for {:.1} ms; the lock of \
+             title memory by address waited for {:.1} ms ({:.0} asks); tables: {:.0} to bring up to date, {:.0} known and left as they \
+             were, {:.0} known and walked, {:.0} made anew with {:.0} entries ({:.0} of them from the list's own views), {:.0} records \
+             hashed",
+            per(BINDS),
+            all as f64 / 1e6 / frames,
+            all as f64 / 1e3 / n[BINDS] as f64,
+            text.join("; "),
+            ms(READABLE),
+            per(READABLES),
+            ms(UPLOADS),
+            ms(MEMORY_LOCK),
+            per(MEMORY_ASKS),
+            per(FRESH),
+            per(KNOWN_LEFT),
+            per(KNOWN_WALKED),
+            per(MADE),
+            per(MADE_ENTRIES),
+            per(LISTED),
+            per(HASHED),
+        );
+    }
+}
+
 /// `DispatchX`: the counts are threads (the console's dispatch initiator bit
 /// "use thread dimensions"; DexNom/VIctory bc3cd4b0). Taken for groups, a
 /// rehydration stage of the structure builder ran up to 64 times its threads
@@ -4857,6 +5050,14 @@ impl RecordHash {
 }
 
 fn readable(list: &HostList, kind: ResourceType, view: &View) {
+    let began = std::time::Instant::now();
+    readable_timed(list, kind, view);
+    prep::count(prep::READABLES, 1);
+    prep::step(prep::READABLE, began);
+}
+
+/// [`readable`], untimed.
+fn readable_timed(list: &HostList, kind: ResourceType, view: &View) {
     const UNORDERED_ACCESS: u32 = 0x8;
     let placed = crate::descriptor::host::placed_texture(view);
     let view = placed.as_ref().unwrap_or(view);
@@ -4898,7 +5099,9 @@ fn readable(list: &HostList, kind: ResourceType, view: &View) {
                     (Some(_), View::Shader(_, Some(desc))) => crate::resource::first_mip(desc),
                     _ => 0,
                 };
+                let asked = std::time::Instant::now();
                 crate::texture::upload_from(list, *resource as This, first);
+                prep::step(prep::UPLOADS, asked);
             }
             // A depth texture shaders also write: what they wrote, first.
             list.twin_use(*resource as This, false, false);
