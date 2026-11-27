@@ -4332,6 +4332,9 @@ impl State {
         arguments: u64,
         count: Option<u64>,
     ) -> bool {
+        let began = std::time::Instant::now();
+        // (what this one cost, by part: [`IndirectCost`])
+        let mut cost = IndirectCost::default();
         // Skip before the argument clamp can mutate the indirect buffer.
         #[cfg(feature = "diagnostics")]
         if crate::pipeline::is_skipped(self.pipeline as This) {
@@ -4431,8 +4434,15 @@ impl State {
         }
         // One record without a count: clamped in a batch (`batches`).
         let batch = if !alone && batches() > 0 && max == 1 && count.is_none() {
+            let at = std::time::Instant::now();
             args.refresh(list, arguments, len);
-            self.batched(list, &args, arguments, kind)
+            cost.refresh += at.elapsed();
+            cost.bytes += len;
+            let at = std::time::Instant::now();
+            let batched = self.batched(list, &args, arguments, kind);
+            cost.clamp += at.elapsed();
+            cost.path = if batched.is_some() { 1 } else { 0 };
+            batched
         } else {
             None
         };
@@ -4463,6 +4473,7 @@ impl State {
             .filter(|w| same(w) && offset >= w.base)
             .filter(|w| (offset - w.base) % u64::from(w.step) == 0 && (offset - w.base) / u64::from(w.step) < u64::from(w.records))
             .map(|w| (w.scratch.clone(), offset - w.base));
+        let was_hit = batch.is_none() && hit.is_some();
         let (bounded, at) = match batch.or(hit) {
             Some(hit) => hit,
             None => {
@@ -4487,10 +4498,14 @@ impl State {
                     }
                     _ => (stride, max),
                 };
+                let at = std::time::Instant::now();
                 args.refresh(list, arguments, len.max(u64::from(step) * u64::from(records)));
                 if let Some((s, at)) = &counter {
                     s.refresh(list, *at, 4);
                 }
+                cost.refresh += at.elapsed();
+                cost.bytes += len.max(u64::from(step) * u64::from(records));
+                let at = std::time::Instant::now();
                 // Bounded first: the clamp binds a compute pipeline of its
                 // own and copies clamped active records into a scratch
                 // buffer at offset 0.
@@ -4502,6 +4517,8 @@ impl State {
                 } else {
                     crate::indirect::bound(list, (&args.buffer, offset), count_arg, (kind, step, records))
                 };
+                cost.clamp += at.elapsed();
+                cost.path = if ordered { 3 } else { 2 };
                 let Some(bounded) = bounded else {
                     self.window = None;
                     why("not bounded (no clamp, or arguments not 4-byte aligned)");
@@ -4521,12 +4538,17 @@ impl State {
                 (bounded, 0)
             }
         };
+        if cost.path == 0 && was_hit {
+            cost.path = 4;
+        }
+        let prepared = std::time::Instant::now();
         let ran = match kind {
             DRAW | INDEXED => self.prepare(list, kind == INDEXED),
             MESH => self.prepare_for(list, false, true),
             DISPATCH => self.bind(list, p, true),
             _ => false,
         };
+        cost.prepare += prepared.elapsed();
         if !ran {
             why("prepare failed");
             return false;
@@ -4568,8 +4590,78 @@ impl State {
         } else {
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }
+        cost.add(began.elapsed(), max);
         true
     }
+}
+
+/// What indirect executions cost on the threads that translate lists, since
+/// the last line ([`indirect_cost_line`]): executions, nanoseconds in all,
+/// refreshing the arguments' (and count's) host copies, clamping (a batch or
+/// a pass of its own), preparing the draw or dispatch, bytes refreshed, the
+/// records asked for; then executions by path: batched, clamped in a pass,
+/// clamped alone in order (port 1's in-place arguments), a window's record
+/// already clamped. Run 2026-11-27 19:36: 5,500-6,150 a frame at 600-800 us
+/// each, 90 % of translating the frame's lists.
+static INDIRECT_COST: [AtomicU64; 12] = [const { AtomicU64::new(0) }; 12];
+
+#[derive(Default)]
+struct IndirectCost {
+    refresh: std::time::Duration,
+    clamp: std::time::Duration,
+    prepare: std::time::Duration,
+    bytes: u64,
+    /// 0 none known, 1 batched, 2 clamped in a pass, 3 alone in order, 4 a
+    /// window's record.
+    path: usize,
+}
+
+impl IndirectCost {
+    fn add(&self, all: std::time::Duration, max: u32) {
+        let c = &INDIRECT_COST;
+        c[0].fetch_add(1, Ordering::Relaxed);
+        c[1].fetch_add(all.as_nanos() as u64, Ordering::Relaxed);
+        c[2].fetch_add(self.refresh.as_nanos() as u64, Ordering::Relaxed);
+        c[3].fetch_add(self.clamp.as_nanos() as u64, Ordering::Relaxed);
+        c[4].fetch_add(self.prepare.as_nanos() as u64, Ordering::Relaxed);
+        c[5].fetch_add(self.bytes, Ordering::Relaxed);
+        c[6].fetch_add(u64::from(max), Ordering::Relaxed);
+        if (1..=4).contains(&self.path) {
+            c[6 + self.path].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// With the frame line: [`INDIRECT_COST`] per frame over `frames`.
+pub(crate) fn indirect_cost_line(frames: f64) {
+    let c: Vec<u64> = INDIRECT_COST.iter().map(|a| a.swap(0, Ordering::Relaxed)).collect();
+    if c[0] == 0 {
+        return;
+    }
+    let ms = |i: usize| c[i] as f64 / 1e6 / frames;
+    let each = |i: usize| c[i] as f64 / 1e3 / c[0] as f64;
+    tracing::info!(
+        "indirect executions per frame (on the threads that translate lists): {:.0} in {:.1} ms ({:.0} us each): refreshing their \
+         arguments {:.1} ms ({:.0} us each, {:.1} MB), clamping {:.1} ms ({:.0} us each), preparing {:.1} ms ({:.0} us each), the rest \
+         {:.1} ms; {:.1} records asked for each; by path: batched {:.0}, clamped in a pass {:.0}, alone in order (port 1) {:.0}, a \
+         window's record {:.0}",
+        c[0] as f64 / frames,
+        ms(1),
+        each(1),
+        ms(2),
+        each(2),
+        c[5] as f64 / 1e6 / frames,
+        ms(3),
+        each(3),
+        ms(4),
+        each(4),
+        ms(1) - ms(2) - ms(3) - ms(4),
+        c[6] as f64 / c[0] as f64,
+        c[7] as f64 / frames,
+        c[8] as f64 / frames,
+        c[9] as f64 / frames,
+        c[10] as f64 / frames,
+    );
 }
 
 /// `DispatchX`: the counts are threads (the console's dispatch initiator bit
