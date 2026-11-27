@@ -83,6 +83,12 @@ $settings = [ordered]@{
     VICTORY_LEVELS_ON_DEMAND    = '0'
     # 16 GB of RAM: loose copies of title windows capped while RAM is short
     VICTORY_WINDOW_BUDGET_MB    = '1024'
+    # every ray a miss while the ray-tracing structure builder is off (after
+    # edsuuu/VI-BR-PORT 7d7b9e49 and the passes after it): the ray-only
+    # passes are left out, lights reach what they face (faces were black in
+    # cutscenes). Part of the shader translation: set in every mode, or each
+    # change of mode would translate every shader again.
+    VICTORY_RT_MISS             = '1'
     # the frame statistics line (fps, ms/frame) and the memory lines in the
     # log (VICTORY_BLOBS_LOG=1 adds the shaders that do not translate and
     # what the pipeline methods 0x1c8 and 0x218 are given, as base64)
