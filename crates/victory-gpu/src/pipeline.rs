@@ -346,6 +346,10 @@ fn for_rays(bytes: &[u8]) -> RayOnly {
         RayOnly::Trace
     } else if has(b"CS_GenerateShadowMasks_Raytraced") || has(b"CS_RTShadowTrace") || has(b"CS_RaytraceShadows") {
         RayOnly::ShadowMask
+    } else if has(b"CS_TransmissionVolumetrics_Tiled_") {
+        // (`_Tiled_<digits>` and `_Tiled_LocalLights_<digits>`; not `_Temporal_Tiled` nor
+        // `_GenerateTiles`.)
+        RayOnly::WaterLight
     } else {
         RayOnly::No
     }
@@ -362,6 +366,10 @@ enum RayOnly {
     Activate,
     Trace,
     ShadowMask,
+    /// Not for rays: the light in the water's volume, in tiles
+    /// (`water_shading:CS_TransmissionVolumetrics_Tiled` and `_Tiled_LocalLights`), left
+    /// out on hosts of 32-lane waves ([`skips_rt_skin`]).
+    WaterLight,
 }
 
 #[cfg(all(test, windows))]
@@ -372,12 +380,16 @@ fn ray_programs_are_known_by_name() {
     assert_eq!(for_rays(b"computeclothSkinning"), RayOnly::No);
     assert_eq!(for_rays(b"..\0CS_RaytracingResolve_Opaque_12345678_Wrapped\0.."), RayOnly::Resolve);
     assert_eq!(for_rays(b"..\0CS_ScreenProbes_ActivateRays_0_Wrapped\0.."), RayOnly::Activate);
-    assert_eq!(for_rays(b"..\0CSGenerateHairVB_c88a8f19_Wrapped\0.."), RayOnly::Skin);
+    assert_eq!(for_rays(b"..\0CSGenerateHairVB_c88a8f19_Wrapped\0.."), RayOnly::HairVb);
     assert_eq!(for_rays(b"..\0CS_ScreenProbes_TraceRays_RayBinning_BVH_Mixed\0.."), RayOnly::Trace);
     assert_eq!(for_rays(b"..\0CS_ScreenProbes_TraceRays_Voxels\0.."), RayOnly::No);
     assert_eq!(for_rays(b"..\0CS_ScreenProbes_TraceRays_Fallback\0.."), RayOnly::No);
     assert_eq!(for_rays(b"..\0CS_RaytraceVBuffer_ShaderBinning_WithFar\0.."), RayOnly::Trace);
     assert_eq!(for_rays(b"..\0CS_RaytraceVBuffer_Voxels_RayBinning\0.."), RayOnly::No);
+    assert_eq!(for_rays(b"..\0CS_TransmissionVolumetrics_Tiled_5dc3b259_Wrapped\0.."), RayOnly::WaterLight);
+    assert_eq!(for_rays(b"..\0CS_TransmissionVolumetrics_Tiled_LocalLights_6f225b64_Wrapped\0.."), RayOnly::WaterLight);
+    assert_eq!(for_rays(b"..\0CS_TransmissionVolumetrics_Temporal_Tiled_c7fd991b_Wrapped\0.."), RayOnly::No);
+    assert_eq!(for_rays(b"..\0CS_TransmissionVolumetrics_GenerateTiles_1aa247ed_Wrapped\0.."), RayOnly::No);
 }
 
 /// Whether a dispatch of `this` is left out because it only serves rays,
@@ -398,6 +410,7 @@ pub(crate) fn skips_rt_skin(this: This) -> bool {
     static ACTIVATE: OnceLock<bool> = OnceLock::new();
     static TRACE: OnceLock<bool> = OnceLock::new();
     static SHADOW: OnceLock<bool> = OnceLock::new();
+    static WATER: OnceLock<bool> = OnceLock::new();
     if this.is_null() {
         return false;
     }
@@ -415,6 +428,16 @@ pub(crate) fn skips_rt_skin(this: This) -> bool {
         // (opt-in while it is tried: `VICTORY_SKIP_RT_SHADOW=1`)
         RayOnly::ShadowMask => *SHADOW.get_or_init(|| {
             std::env::var_os("VICTORY_SKIP_RT_SHADOW").is_some_and(|v| v == "1") && off("VICTORY_RT_SHADOW")
+        }),
+        // Programs of one 64-lane wave a group, which a host of 32-lane waves gets in the
+        // wave-wide form only. In that form they leave whole tiles of open water dark (black
+        // rectangles towards the horizon on the first boat ride here) and take about 15 ms of
+        // the card a frame on an RTX 5070 (trustno1-coder/VIctory 35c15608, its runs r_water1
+        // and r_water3: 25 fps with them, 30 without; fxceless/victory-fork's README names the
+        // same two). Left out there the water has no light of its own depth (darker, bluer)
+        // and no blocks. `VICTORY_WATER_LIGHT=1` runs them.
+        RayOnly::WaterLight => *WATER.get_or_init(|| {
+            victory_shader::emit::host_settings()[0] == 32 && std::env::var_os("VICTORY_WATER_LIGHT").is_none_or(|v| v != "1")
         }),
     }
 }
