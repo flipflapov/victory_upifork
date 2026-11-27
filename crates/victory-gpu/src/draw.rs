@@ -4724,7 +4724,11 @@ pub(crate) mod prep {
     pub(crate) const READABLE: usize = 14;
     pub(crate) const UPLOADS: usize = 15;
     pub(crate) const MEMORY_LOCK: usize = 16;
-    pub(crate) const STEPS: usize = 17;
+    /// Copies of buffer views' own bytes asked for (`crate::shadow::exact`),
+    /// and of that the waits for their map's lock.
+    pub(crate) const EXACT: usize = 17;
+    pub(crate) const EXACT_LOCK: usize = 18;
+    pub(crate) const STEPS: usize = 19;
     const NAMES: [&str; 14] = [
         "textures picked early",
         "heaps, root signature and pipeline",
@@ -4833,8 +4837,9 @@ pub(crate) mod prep {
             .collect();
         tracing::info!(
             "draws and dispatches prepared per frame (all threads translating lists): {:.0} in {:.1} ms ({:.0} us each), the costliest \
-             step first: {}; inside them: made readable {:.1} ms ({:.0} times), of it texture uploads asked for {:.1} ms; the lock of \
-             title memory by address waited for {:.1} ms ({:.0} asks); tables: {:.0} to bring up to date, {:.0} known and left as they \
+             step first: {}; inside them: made readable {:.1} ms ({:.0} times), of it texture uploads asked for {:.1} ms; copies of \
+             views' own bytes asked for {:.1} ms, of it their lock waited for {:.1} ms; the lock of title memory by address waited \
+             for {:.1} ms ({:.0} asks); tables: {:.0} to bring up to date, {:.0} known and left as they \
              were, {:.0} known and walked, {:.0} made anew with {:.0} entries ({:.0} of them from the list's own views), {:.0} records \
              hashed",
             per(BINDS),
@@ -4844,6 +4849,8 @@ pub(crate) mod prep {
             ms(READABLE),
             per(READABLES),
             ms(UPLOADS),
+            ms(EXACT),
+            ms(EXACT_LOCK),
             ms(MEMORY_LOCK),
             per(MEMORY_ASKS),
             per(FRESH),
