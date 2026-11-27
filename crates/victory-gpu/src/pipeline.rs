@@ -323,16 +323,21 @@ fn of_builder(shaders: &[Arc<Shader>]) -> bool {
 /// `CS_ScreenProbes_ActivateRays*` picks the screen probes that cast rays.
 ///
 /// And the tracing itself against the structures, with the hair's geometry
-/// made for them (8 % of the card's time in the opening cutscene): the
-/// `bvh_skinning_smh` program `CSGenerateHairVB`, the screen probes'
+/// (8 % of the card's time in the opening cutscene): the screen probes'
 /// `CS_ScreenProbes_TraceRays*_BVH*` and the reflections'
 /// `CS_RaytraceVBuffer*`. Their `Fallback` and `Voxels` forms march through
 /// the title's voxels, not the structures, and light the picture: they run.
+///
+/// The `bvh_skinning_smh` program `CSGenerateHairVB` makes the hair's geometry: once taken
+/// for the structures only, it also feeds the hair's shadow tiles, so it runs
+/// ([`RayOnly::HairVb`]).
 #[cfg(windows)]
 fn for_rays(bytes: &[u8]) -> RayOnly {
     let has = |name: &[u8]| bytes.windows(name.len()).any(|w| w == name);
-    if has(b"CSComputeSkinning") || has(b"CSGenerateHairVB") {
+    if has(b"CSComputeSkinning") {
         RayOnly::Skin
+    } else if has(b"CSGenerateHairVB") {
+        RayOnly::HairVb
     } else if has(b"CS_RaytracingResolve") {
         RayOnly::Resolve
     } else if has(b"CS_ScreenProbes_ActivateRays") {
@@ -352,6 +357,7 @@ fn for_rays(bytes: &[u8]) -> RayOnly {
 enum RayOnly {
     No,
     Skin,
+    HairVb,
     Resolve,
     Activate,
     Trace,
@@ -387,6 +393,7 @@ pub(crate) fn skips_rt_skin(this: This) -> bool {
             && std::env::var_os(switch).is_none_or(|v| v != "1")
     }
     static SKIN: OnceLock<bool> = OnceLock::new();
+    static HAIR_VB: OnceLock<bool> = OnceLock::new();
     static RESOLVE: OnceLock<bool> = OnceLock::new();
     static ACTIVATE: OnceLock<bool> = OnceLock::new();
     static TRACE: OnceLock<bool> = OnceLock::new();
@@ -397,6 +404,11 @@ pub(crate) fn skips_rt_skin(this: This) -> bool {
     match pipeline(this).rt_only {
         RayOnly::No => false,
         RayOnly::Skin => *SKIN.get_or_init(|| off("VICTORY_RT_SKIN")),
+        // The hair's geometry is also what the sun's shadow mask reads for the tiles with hair
+        // (`CS_GenerateShadowMasks_HairOnly`): left out, those tiles kept stale, lit values over
+        // the hair (blocky orange hair in the prison window, run prisao-raios; right with it, run
+        // prisao-pele). It runs unless `VICTORY_RT_HAIR_VB=0`.
+        RayOnly::HairVb => *HAIR_VB.get_or_init(|| std::env::var_os("VICTORY_RT_HAIR_VB").is_some_and(|v| v == "0")),
         RayOnly::Resolve => *RESOLVE.get_or_init(|| off("VICTORY_RT_RESOLVE")),
         RayOnly::Activate => *ACTIVATE.get_or_init(|| off("VICTORY_ACTIVATE_RAYS")),
         RayOnly::Trace => *TRACE.get_or_init(|| off("VICTORY_RT_TRACE")),
