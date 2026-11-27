@@ -171,6 +171,39 @@ static BACKS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 /// recordings let go of in the middle.
 static CHUNKS: AtomicU64 = AtomicU64::new(0);
 static STATS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+/// Since the last line, by the code of the call: nanoseconds translating
+/// calls of it on our threads, and the calls ([`translate`], [`line`]).
+static BY_OP: [[AtomicU64; 2]; OPS] = [const { [const { AtomicU64::new(0) }; 2] }; OPS];
+/// Codes of calls counted apart in [`BY_OP`] (the rest in the last).
+const OPS: usize = 64;
+
+/// The name of a call's code, for [`line`].
+fn op_name(op: usize) -> &'static str {
+    const AFTER: [&str; 17] = [
+        "RESET",
+        "CLOSE",
+        "UPLOAD",
+        "BARRIER",
+        "BARRIER_GROUPS",
+        "VIEWPORTS",
+        "SCISSORS",
+        "BLEND_FACTOR",
+        "HEAPS",
+        "COMPUTE_CONSTANTS",
+        "GRAPHICS_CONSTANTS",
+        "INDEX_BUFFER",
+        "VERTEX_BUFFERS",
+        "TARGETS",
+        "CLEAR_RTV",
+        "CLEAR_DSV",
+        "COPY_TEXTURE",
+    ];
+    let end = Plain::END as usize;
+    match op {
+        op if op < end => PLAIN_NAMES.get(op).copied().unwrap_or("?"),
+        op => AFTER.get(op - end).copied().unwrap_or("other"),
+    }
+}
 
 fn held<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -357,6 +390,19 @@ pub(crate) fn line(frames: f64) {
         CHUNKS.swap(0, Relaxed) as f64 / frames,
         s[3]
     );
+    // What the calls cost by kind, the most first: where translating a frame's
+    // lists goes (2.2-3.4 s of all threads a frame in run 2026-11-27 18:45).
+    let mut by: Vec<(usize, u64, u64)> =
+        BY_OP.iter().enumerate().map(|(op, c)| (op, c[0].swap(0, Relaxed), c[1].swap(0, Relaxed))).filter(|c| c.2 > 0).collect();
+    by.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    let text: Vec<String> = by
+        .iter()
+        .take(12)
+        .map(|&(op, ns, n)| {
+            format!("{} {:.1} ms ({:.0}x, {:.1} us each)", op_name(op), ns as f64 / 1e6 / frames, n as f64 / frames, ns as f64 / 1e3 / n as f64)
+        })
+        .collect();
+    tracing::info!("list calls translated per frame by kind, the costliest first (all threads): {}", text.join("; "));
 }
 
 #[inline]
@@ -398,6 +444,8 @@ macro_rules! plain {
         #[allow(clippy::upper_case_acronyms, non_camel_case_types)]
         #[repr(u64)]
         enum Plain { $($op),* , END }
+        /// Their names, in the order of their codes (for [`line`]'s costs).
+        const PLAIN_NAMES: &[&str] = &[$(stringify!($op)),*];
         $(extern "system" fn $name(this: This $(, $a: $t)*) {
             front(this).put(Plain::$op as u64, &[$(Word::word($a)),*]);
         })*
@@ -681,10 +729,31 @@ extern "system" fn copy_texture_region_x(
 /// Makes the calls of a stream on `list`: how many, and whether the last one
 /// closed it. Once `left` says so only what must not be lost is done.
 fn translate(list: This, stream: &[u64], left: impl Fn() -> bool) -> (u64, bool) {
+    // (by call code: nanoseconds and calls, added to [`BY_OP`] once a chunk)
+    let mut costs = [[0u64; 2]; OPS];
+    let r = translate_timed(list, stream, left, &mut costs);
+    for (total, mine) in BY_OP.iter().zip(&costs) {
+        if mine[1] > 0 {
+            total[0].fetch_add(mine[0], Relaxed);
+            total[1].fetch_add(mine[1], Relaxed);
+        }
+    }
+    r
+}
+
+fn translate_timed(list: This, stream: &[u64], left: impl Fn() -> bool, costs: &mut [[u64; 2]; OPS]) -> (u64, bool) {
     let (mut i, mut calls, mut closed) = (0, 0, false);
     let mut skip = left();
+    let mut last: Option<(usize, std::time::Instant)> = None;
     while i < stream.len() {
+        let now = std::time::Instant::now();
+        if let Some((op, began)) = last.take() {
+            let cost = &mut costs[op];
+            cost[0] += now.duration_since(began).as_nanos() as u64;
+            cost[1] += 1;
+        }
         let (op, len) = (stream[i] & 0xffff, (stream[i] >> 16) as usize);
+        last = Some(((op as usize).min(OPS - 1), now));
         let w = &stream[i + 1..i + 1 + len];
         i += 1 + len;
         calls += 1;
@@ -781,6 +850,11 @@ fn translate(list: This, stream: &[u64], left: impl Fn() -> bool) -> (u64, bool)
             }
             _ => {}
         }
+    }
+    if let Some((op, began)) = last {
+        let cost = &mut costs[op];
+        cost[0] += began.elapsed().as_nanos() as u64;
+        cost[1] += 1;
     }
     (calls, closed)
 }
