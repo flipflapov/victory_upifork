@@ -278,6 +278,18 @@ pub(crate) const BAKE_PIXEL_SHADERS: [&str; 7] = [
 /// permutations beyond `BAKE_PIXEL_SHADERS`.
 const BAKE_GEOMETRY_SHADERS: [&str; 2] = ["089d6271be6650ef", "d4111a6e6ea49d91"];
 
+/// Whether `shader` is a program of the title's decoration bake.
+fn bake_shader(shader: &crate::pipeline::Shader) -> bool {
+    shader.bakes || BAKE_PIXEL_SHADERS.contains(&shader.hash.as_str())
+}
+
+/// Whether a draw with the title pipeline `pipeline` bound gets the pass of
+/// its own ahead of a bake ([`State::early_textures`]): written-down lists
+/// (`crate::list::thin`) translate such draws at the title's call.
+pub(crate) fn bake_pipeline(pipeline: This) -> bool {
+    early_budgets().1 > 0 && crate::pipeline::shaders_any(pipeline, bake_shader)
+}
+
 /// Since the start: early runs of the texture pass, and those of them
 /// made for a bake draw.
 pub(crate) static EARLY_TEXTURE_PASSES: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
@@ -2436,8 +2448,8 @@ impl State {
             return;
         }
         // (The title's 51 bake programs are known by name too, after
-        // edsuuu/VI-BR-PORT 10ac68f9.)
-        let is_bake = bake_ms > 0 && (self.is_bake_draw(p) || p.stages.iter().any(|s| s.shader.bakes));
+        // edsuuu/VI-BR-PORT 10ac68f9 and c354528b.)
+        let is_bake = bake_ms > 0 && (self.is_bake_draw(p) || p.stages.iter().any(|s| bake_shader(&s.shader)));
         static FRAME: AtomicU64 = AtomicU64::new(u64::MAX);
         // The milliseconds this frame's bake draws have taken so far: a
         // frame has several, and together they get `bake_ms`.
