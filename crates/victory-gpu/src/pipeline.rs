@@ -367,8 +367,8 @@ enum RayOnly {
     Trace,
     ShadowMask,
     /// Not for rays: the light in the water's volume, in tiles
-    /// (`water_shading:CS_TransmissionVolumetrics_Tiled` and `_Tiled_LocalLights`), left
-    /// out on hosts of 32-lane waves ([`skips_rt_skin`]).
+    /// (`water_shading:CS_TransmissionVolumetrics_Tiled` and `_Tiled_LocalLights`), which
+    /// can be left out on hosts of 32-lane waves ([`skips_rt_skin`]).
     WaterLight,
 }
 
@@ -430,14 +430,15 @@ pub(crate) fn skips_rt_skin(this: This) -> bool {
             std::env::var_os("VICTORY_SKIP_RT_SHADOW").is_some_and(|v| v == "1") && off("VICTORY_RT_SHADOW")
         }),
         // Programs of one 64-lane wave a group, which a host of 32-lane waves gets in the
-        // wave-wide form only. In that form they leave whole tiles of open water dark (black
-        // rectangles towards the horizon on the first boat ride here) and take about 15 ms of
-        // the card a frame on an RTX 5070 (trustno1-coder/VIctory 35c15608, its runs r_water1
-        // and r_water3: 25 fps with them, 30 without; fxceless/victory-fork's README names the
-        // same two). Left out there the water has no light of its own depth (darker, bluer)
-        // and no blocks. `VICTORY_WATER_LIGHT=1` runs them.
+        // wave-wide form only. On an RTX 5070 at the Series X profile they leave whole tiles
+        // of open water dark and take about 15 ms of the card a frame (trustno1-coder/VIctory
+        // 35c15608: 25 fps with them, 30 without), and that tree leaves them out. Here (RTX
+        // 4060 Ti, Series S profile, the first boat ride, runs barco-s-agua0 and barco-s-agua1
+        // of 27 Nov) they cost half a frame a second (23.8 fps with them, 24.3 without) and
+        // without them the water near the boat is black instead of lit green, so they run;
+        // `VICTORY_WATER_LIGHT=0` leaves them out on a host of 32-lane waves.
         RayOnly::WaterLight => *WATER.get_or_init(|| {
-            victory_shader::emit::host_settings()[0] == 32 && std::env::var_os("VICTORY_WATER_LIGHT").is_none_or(|v| v != "1")
+            victory_shader::emit::host_settings()[0] == 32 && std::env::var_os("VICTORY_WATER_LIGHT").is_some_and(|v| v == "0")
         }),
     }
 }
