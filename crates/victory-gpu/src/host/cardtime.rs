@@ -36,8 +36,9 @@ const OWN: usize = 5;
 
 /// Slots of the ring, and of a block a list takes at a time.
 const SLOTS: u32 = 1 << 17;
-/// After them, slots in pairs for lists of ours ([`other_begin`]).
-const OTHER_SLOTS: u32 = 4096;
+/// After them, slots in threes for lists of ours ([`other_begin`]): its
+/// beginning, a stamp between its parts ([`other_mid`]), its end.
+const OTHER_SLOTS: u32 = 4095;
 const BLOCK: u32 = 64;
 /// Stamps a list makes at most (the last, its end, always).
 const MOST: usize = 8192;
@@ -300,10 +301,13 @@ impl HostList {
 /// passes), and those that compare them after it.
 pub(crate) const SYNC: u8 = 0;
 pub(crate) const CHECK: u8 = 1;
-/// Their stamps not read yet: the list, its kind, the first of its pair.
-static OTHER: Mutex<Vec<(usize, u8, u32)>> = Mutex::new(Vec::new());
-/// Since the last line: ticks and lists, by kind.
+/// Their stamps not read yet: the list, its kind, the first of its three,
+/// and whether the one between its parts was written.
+static OTHER: Mutex<Vec<(usize, u8, u32, bool)>> = Mutex::new(Vec::new());
+/// Since the last line: ticks and lists, by kind; and of [`SYNC`], the ticks
+/// of its first part (the sends) where it had two.
 static OTHER_BY: [[AtomicU64; 2]; 2] = [const { [const { AtomicU64::new(0) }; 2] }; 2];
+static SYNC_SENDS: AtomicU64 = AtomicU64::new(0);
 
 /// One of those lists of ours (`kind`) begins (it was just reset, its last
 /// run over): what that run took is counted, and a stamp begins this one.
@@ -316,20 +320,40 @@ pub(crate) fn other_begin(list: &ID3D12GraphicsCommandList, kind: u8) {
         let mut pending = OTHER.lock().unwrap_or_else(|e| e.into_inner());
         pending.iter().position(|e| e.0 == key).map(|i| pending.swap_remove(i))
     };
-    if let Some((_, was, slot)) = before {
-        // SAFETY: the pair's slots of the mapping, written by the list's
+    if let Some((_, was, slot, mid)) = before {
+        // SAFETY: the three slots of the mapping, written by the list's
         // last run, which is over.
-        let [from, to] = [slot, slot + 1].map(|s| unsafe { ((ring.data as *const u64).add(s as usize)).read_volatile() });
+        let [from, between, to] =
+            [slot, slot + 1, slot + 2].map(|s| unsafe { ((ring.data as *const u64).add(s as usize)).read_volatile() });
         if to >= from && to - from <= ring.frequency.saturating_mul(2) {
             OTHER_BY[usize::from(was.min(1))][0].fetch_add(to - from, Relaxed);
             OTHER_BY[usize::from(was.min(1))][1].fetch_add(1, Relaxed);
+            if was == SYNC && mid && (from..=to).contains(&between) {
+                SYNC_SENDS.fetch_add(between - from, Relaxed);
+            }
         }
     }
     static NEXT: AtomicU32 = AtomicU32::new(0);
-    let slot = SLOTS + NEXT.fetch_add(2, Relaxed) % OTHER_SLOTS;
+    let slot = SLOTS + NEXT.fetch_add(3, Relaxed) % OTHER_SLOTS;
     // SAFETY: an open list and our query heap; the slot is in it.
     unsafe { list.EndQuery(&ring.heap, D3D12_QUERY_TYPE_TIMESTAMP, slot) };
-    OTHER.lock().unwrap_or_else(|e| e.into_inner()).push((key, kind, slot));
+    OTHER.lock().unwrap_or_else(|e| e.into_inner()).push((key, kind, slot, false));
+}
+
+/// Between the parts of a list [`other_begin`] began: of a [`SYNC`] list,
+/// its sends before, its hash passes after.
+pub(crate) fn other_mid(list: &ID3D12GraphicsCommandList) {
+    let Some(ring) = ring() else {
+        return;
+    };
+    let key = list.as_raw() as usize;
+    let mut pending = OTHER.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(entry) = pending.iter_mut().find(|e| e.0 == key) else {
+        return;
+    };
+    entry.3 = true;
+    // SAFETY: an open list and our query heap; the slot is in it.
+    unsafe { list.EndQuery(&ring.heap, D3D12_QUERY_TYPE_TIMESTAMP, entry.2 + 1) };
 }
 
 /// The list [`other_begin`] began is about to close: its last stamp, and
@@ -344,8 +368,8 @@ pub(crate) fn other_end(list: &ID3D12GraphicsCommandList) {
     };
     // SAFETY: an open list; our heap and read-back buffer, the slots in both.
     unsafe {
-        list.EndQuery(&ring.heap, D3D12_QUERY_TYPE_TIMESTAMP, slot + 1);
-        list.ResolveQueryData(&ring.heap, D3D12_QUERY_TYPE_TIMESTAMP, slot, 2, &ring._back, u64::from(slot) * 8);
+        list.EndQuery(&ring.heap, D3D12_QUERY_TYPE_TIMESTAMP, slot + 2);
+        list.ResolveQueryData(&ring.heap, D3D12_QUERY_TYPE_TIMESTAMP, slot, 3, &ring._back, u64::from(slot) * 8);
     }
 }
 
@@ -358,6 +382,7 @@ pub(crate) fn line(frames: f64) {
     let counts: [u64; 4] = std::array::from_fn(|i| COUNTS[i].swap(0, Relaxed));
     let by = BY_PIPELINE.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default();
     let other: [[u64; 2]; 2] = std::array::from_fn(|k| std::array::from_fn(|i| OTHER_BY[k][i].swap(0, Relaxed)));
+    let sends = SYNC_SENDS.swap(0, Relaxed);
     if frames <= 0.0 || (counts[0] == 0 && counts[2] == 0) {
         return;
     }
@@ -379,7 +404,8 @@ pub(crate) fn line(frames: f64) {
          stamps; {:.1} lists left out, their stamps written over); the title's pipelines {:.1} ms ({pipelines} of them), the title's \
          work before its first pipeline {:.1} ms, our clamps of indirect arguments {:.1} ms ({:.0} of them), our passes as a list \
          closes {:.1} ms, our lists of the submissions' own steps {:.1} ms; outside the title's lists: copies in the card's memory \
-         brought up to date (sends and hash passes) {:.1} ms ({:.1} lists), compared after submissions {:.1} ms ({:.1} lists); the \
+         brought up to date {:.1} ms ({:.1} lists; of it the sends {:.1} ms, the hash passes and the rest {:.1} ms), compared after \
+         submissions {:.1} ms ({:.1} lists); the \
          costliest pipelines: {}",
         ms(total),
         counts[0] as f64 / frames,
@@ -393,6 +419,8 @@ pub(crate) fn line(frames: f64) {
         ms(kinds[OWN]),
         ms(other[0][0]),
         other[0][1] as f64 / frames,
+        ms(sends),
+        ms(other[0][0].saturating_sub(sends)),
         ms(other[1][0]),
         other[1][1] as f64 / frames,
         text.join("; "),

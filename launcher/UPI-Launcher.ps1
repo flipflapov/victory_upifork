@@ -135,6 +135,11 @@ if ($Turbo -and !$Safe) {
     # of the PC's memory, 7.5 GB here)
     $settings['VICTORY_LIST_IDLE_TRIM_S'] = '10'
     $settings['VICTORY_SEND_SPARE_MB'] = '256'
+    # what changed on the CPU's side of copies in the card's memory goes up
+    # on a copy queue of its own while the card still draws (run 2026-11-27
+    # 22:25: the drawing queue spent 22-50 ms a frame bringing those copies
+    # up to date, ~50 MB a frame across the bus, doing nothing else)
+    $settings['VICTORY_UP_QUEUE'] = '1'
     # (VICTORY_LAND_THREADS=6 was tried in run 2026-11-26 23:30: the landings
     # took as long as with the default 3, waiting on title memory that pages.)
     # (Neptune by Dolberth's smart copy-back, VICTORY_SMART_COPY_BACK=1, is

@@ -988,6 +988,27 @@ pub(crate) static PREPARING: [std::sync::atomic::AtomicU64; 4] = [
 /// memory) and the graphics card's own (indirect arguments, twins' copies).
 /// For the memory line: against what is alive, they show what was let go.
 pub(crate) static MADE: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
+/// Sends `lists` to `queue`, leaving out the places left empty (a host list
+/// that could not close, [`HostList::close`]).
+///
+/// # Safety
+/// As `ExecuteCommandLists`: closed lists of the queue's device.
+unsafe fn execute_lists(queue: &ID3D12CommandQueue, lists: &[Option<ID3D12CommandList>]) {
+    if lists.iter().all(Option::is_some) {
+        // SAFETY: the caller's.
+        unsafe { queue.ExecuteCommandLists(lists) };
+        return;
+    }
+    let sent: Vec<Option<ID3D12CommandList>> = lists.iter().filter(|l| l.is_some()).cloned().collect();
+    if !sent.is_empty() {
+        // SAFETY: the caller's.
+        unsafe { queue.ExecuteCommandLists(&sent) };
+    }
+}
+
+/// Host lists that could not close for want of memory, since the start.
+static BROKEN_LISTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Nanoseconds of making the buffers [`MADE`] counts (creation, residency,
 /// mapping), by the same kinds: upload, shared, the card's.
 static MADE_NS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
@@ -1527,6 +1548,9 @@ pub(crate) struct HostList {
     stamps: OnceLock<Option<(ID3D12QueryHeap, ID3D12Resource)>>,
     /// Where the card's time goes in it ([`cardtime`]).
     card: Mutex<cardtime::Marks>,
+    /// Its D3D12 list could not close for want of memory: it is not sent
+    /// until it is reset ([`HostList::close`]).
+    broken: std::sync::atomic::AtomicBool,
 }
 
 /// A list's prelude: an allocator and a closed list.
@@ -4811,6 +4835,7 @@ impl Host {
                 #[cfg(feature = "diagnostics")]
                 stamps: OnceLock::new(),
                 card: Mutex::default(),
+                broken: std::sync::atomic::AtomicBool::new(false),
             };
             made.card_mark(cardtime::START, 0);
             Ok(made)
@@ -5077,6 +5102,7 @@ impl Host {
                     if !sent.is_empty() {
                         list.ResourceBarrier(&sent);
                     }
+                    cardtime::other_mid(list);
                     list.SetComputeRootSignature(&work.root);
                     list.SetPipelineState(&work.pso);
                     list.SetComputeRootUnorderedAccessView(3, work.differs.0.GetGPUVirtualAddress());
@@ -6396,6 +6422,12 @@ impl Host {
                     _ => crate::copystat::Timed::Title(_run),
                 },
             ));
+            // (A list that could not close is not sent: its place stays, as
+            // an empty one, `execute_lists`.)
+            if list.broken.load(Ordering::Relaxed) {
+                lists.push(None);
+                continue;
+            }
             list.card_submitted(own.as_ref().is_some_and(|own| std::ptr::eq(own.list(), *list)));
             lists.push(list.list.cast().ok());
         }
@@ -6486,7 +6518,7 @@ impl Host {
             let signalled = unsafe {
                 let mut from = 0;
                 for to in cuts.into_iter().chain([lists.len()]) {
-                    self.queue.ExecuteCommandLists(&lists[from..to]);
+                    execute_lists(&self.queue, &lists[from..to]);
                     from = to;
                 }
                 self.queue.Signal(&self.fence, *submitted)
@@ -6545,7 +6577,7 @@ impl Host {
             let started = std::time::Instant::now();
             // SAFETY: closed lists; the fence and event are ours.
             unsafe {
-                self.queue.ExecuteCommandLists(group);
+                execute_lists(&self.queue, group);
                 self.card_sent();
                 let waited = self
                     .queue
@@ -7074,6 +7106,21 @@ impl HostList {
         self.card_end();
         // SAFETY: our list.
         if let Err(e) = unsafe { self.list.Close() } {
+            // For want of memory (the PC's ran out, run 2026-11-27 22:25 on
+            // 16 GB as a heist began): the list is left out of its
+            // submission, a gap in a frame, not the end of the game.
+            if e.code() == windows::Win32::Foundation::E_OUTOFMEMORY {
+                self.broken.store(true, Ordering::Relaxed);
+                let n = BROKEN_LISTS.fetch_add(1, Ordering::Relaxed) + 1;
+                if n.is_power_of_two() {
+                    tracing::warn!(
+                        lists = n,
+                        "a host command list could not close for want of memory: its commands are left out of its submission \
+                         (the count since the start)"
+                    );
+                }
+                return;
+            }
             fail(format_args!(
                 "a host command list did not close ({e}): a command recorded into it was invalid"
             ));
@@ -7107,6 +7154,7 @@ impl HostList {
     pub(crate) fn reset(&self) {
         // (Every submission of it has run: its stamps are there.)
         self.card_account();
+        self.broken.store(false, Ordering::Relaxed);
         self.changed_something();
         #[cfg(feature = "diagnostics")]
         let started = std::time::Instant::now();
