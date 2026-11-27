@@ -1006,6 +1006,16 @@ unsafe fn execute_lists(queue: &ID3D12CommandQueue, lists: &[Option<ID3D12Comman
     }
 }
 
+/// Work of ours left out for want of memory (`what`): said the first time
+/// and then at powers of two of the times since the start.
+fn out_of_memory(what: &str) {
+    static TIMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = TIMES.fetch_add(1, Ordering::Relaxed) + 1;
+    if n.is_power_of_two() {
+        tracing::warn!(times = n, "for want of memory: {what} (times: all such since the start)");
+    }
+}
+
 /// Host lists that could not close for want of memory, since the start.
 static BROKEN_LISTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -5148,7 +5158,18 @@ impl Host {
                 })()
             };
             if let Err(e) = recorded {
-                fail(format_args!("host copies in the card's memory could not be brought up to date ({e})"));
+                // For want of memory (run 2026-11-27 23:11 on 16 GB, as a
+                // heist began): nothing goes up with this submission; what
+                // changed goes up with the next one, not the end of the game.
+                if e.code() != windows::Win32::Foundation::E_OUTOFMEMORY {
+                    fail(format_args!("host copies in the card's memory could not be brought up to date ({e})"));
+                }
+                for (shadow, ranges) in &dirty {
+                    for &(from, to) in ranges {
+                        shadow.resend(from, to);
+                    }
+                }
+                out_of_memory("host copies in the card's memory not brought up to date with this submission: with the next");
             }
             used.push((false, sync));
         }
@@ -5262,6 +5283,12 @@ impl Host {
             };
             match recorded {
                 Ok(list) => plan.check = Some(list),
+                // For want of memory: what this submission's shaders write
+                // into those copies is not looked for (its pieces are not
+                // fetched back), not the end of the game.
+                Err(e) if e.code() == windows::Win32::Foundation::E_OUTOFMEMORY => {
+                    out_of_memory("the compare of host copies in the card's memory left out of this submission");
+                }
                 Err(e) => fail(format_args!("the compare of host copies in the card's memory could not be recorded ({e})")),
             }
             plan.lists.push((true, check));

@@ -101,8 +101,14 @@ if ($Safe) {
 }
 if ($Turbo -and !$Safe) {
     # avatarmanz/VIctory-7900XTX renderer ports (byte-checked against this
-    # executable; 45 ms a frame on Series S there with 5 and 7 as well)
-    $settings['VICTORY_PORT_CONSTANTS'] = '1'
+    # executable; 45 ms a frame on Series S there with 5 and 7 as well).
+    # Not port 1 (VICTORY_PORT_CONSTANTS=1) since run 2026-11-27 23:11: the
+    # title's 185 MB constant heap read in place is read by the card across
+    # the bus (PCIe 3.0 here) by nearly every draw: the card took 90-160 ms a
+    # frame spread over ~1,000 of the title's pipelines. edsuuu/VI-BR-PORT
+    # measured its copy in the card's memory faster on NVIDIA (23.0 -> 25.4
+    # and 23.8 -> 27.7 fps). The faces it brought here are now every ray a
+    # miss's (VICTORY_RT_MISS) and the bake's programs known by name.
     $settings['VICTORY_PORT_DESCRIPTORS'] = '1'
     $settings['VICTORY_PORT_GUARD'] = '1'
     # buffer copies in the card's memory, not the PC's 16 GB (they stop
@@ -134,7 +140,9 @@ if ($Turbo -and !$Safe) {
     # buffers kept spare instead of 768 (they count against the card's share
     # of the PC's memory, 7.5 GB here)
     $settings['VICTORY_LIST_IDLE_TRIM_S'] = '10'
-    $settings['VICTORY_SEND_SPARE_MB'] = '256'
+    # (64 since run 2026-11-27 23:11: the card's share of the PC's memory ran
+    # out as the heist began, 7.6 of 7.5 GB)
+    $settings['VICTORY_SEND_SPARE_MB'] = '64'
     # what changed on the CPU's side of copies in the card's memory goes up
     # on a copy queue of its own while the card still draws (run 2026-11-27
     # 22:25: the drawing queue spent 22-50 ms a frame bringing those copies
