@@ -1801,6 +1801,23 @@ fn unsupported(offset: usize, what: Why) -> Stop {
     Stop::Fail(ShaderError::Unsupported { offset, what })
 }
 
+/// Where a program's constant table starts in its code: where its
+/// instructions end, unless a load at a fixed offset reads below that (then
+/// at `lowest`, the lowest offset any load or descriptor names). The
+/// program's constants follow its instructions, and a load at a computed
+/// offset reads them, not instruction bytes.
+fn code_table_start(p: &crate::ir::Program, addresses: &[&crate::resource::Address], lowest: u32) -> u32 {
+    let code_end = p
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .map(|i| i.machine.offset + 4 * i.machine.words.len())
+        .max()
+        .unwrap_or(0) as u32;
+    let fixed_below = addresses.iter().any(|a| a.dynamic.is_none() && a.offset < code_end);
+    if fixed_below { lowest } else { lowest.max(code_end & !3) }
+}
+
 impl<'a> Lower<'a> {
     fn new(x: &'a Parts<'a>, bad: &'a HashMap<Value, Why>) -> Self {
         let p = x.p;
@@ -2166,22 +2183,22 @@ impl<'a> Lower<'a> {
         let (g, base, len) = match self.code_table {
             Some(t) => t,
             None => {
-                let first = self
+                let addresses: Vec<&crate::resource::Address> = self
                     .x
                     .res
                     .scalar
                     .iter()
-                    .map(|s| s.1)
+                    .map(|s| &s.1)
                     .chain(self.x.res.descriptors.iter().flat_map(|d| {
                         d.source.leaves().into_iter().filter_map(|l| match l {
-                            Source::Built { address, .. } => Some(*address),
+                            Source::Built { address, .. } => Some(address),
                             _ => None,
                         })
                     }))
                     .filter(|a| a.param == CODE)
-                    .map(|a| a.offset & !3)
-                    .min()
-                    .ok_or("a code table")?;
+                    .collect();
+                let lowest = addresses.iter().map(|a| a.offset & !3).min().ok_or("a code table")?;
+                let first = code_table_start(self.x.p, &addresses, lowest);
                 let code = &self.x.native.code;
                 let words: Vec<u32> = code
                     .get(first as usize..)
@@ -4517,7 +4534,9 @@ impl<'a> Lower<'a> {
         self.s.m.cast(c, Cast::Trunc, hi, self.s.t.i32)
     }
 
-    /// `0 × anything = 0`, as in D3D9.
+    /// `0 × anything = 0`, as in D3D9. As on RDNA2, a denormal operand counts
+    /// as zero, so the test is on the exponent bits rather than a float
+    /// compare (whose result would depend on the host's denormal mode).
     fn legacy_mul(&mut self, a: V, b: V) -> V {
         let c = self.cur;
         if host_rdna() & super::rdna::LEGACY != 0 {
@@ -4543,10 +4562,17 @@ impl<'a> Lower<'a> {
             return self.s.m.select(c, z, zero, m);
         }
         let m = self.s.m.bin(c, Bin::Mul, a, b);
-        let zero = self.s.m.f32(0);
-        let az = self.s.m.cmp(c, pred::OEQ, a, zero);
-        let bz = self.s.m.cmp(c, pred::OEQ, b, zero);
+        let exp = self.s.m.i32(0x7F80_0000);
+        let izero = self.s.m.i32(0);
+        let is_zero = |l: &mut Self, v: V| {
+            let bits = l.as_int(v);
+            let e = l.s.m.bin(c, Bin::And, bits, exp);
+            l.s.m.cmp(c, pred::EQ, e, izero)
+        };
+        let az = is_zero(self, a);
+        let bz = is_zero(self, b);
         let z = self.s.m.bin(c, Bin::Or, az, bz);
+        let zero = self.s.m.f32(0);
         self.s.m.select(c, z, zero, m)
     }
 
@@ -13513,7 +13539,7 @@ fn interp_mode(kind: Barycentric) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Lowered, Numeric, Parts, buffer_format, half_shift, lower};
+    use super::{Lowered, Numeric, Parts, buffer_format, code_table_start, half_shift, lower};
     use crate::native::{
         ComputeIo, HwStage, NativeProgram, ResourceType, RootParam, RootType, StageIo, UsedResource,
     };
@@ -13678,6 +13704,31 @@ mod tests {
         assert_eq!(at(3, 7), None);
         // A row no element holds gives nothing, as before.
         assert_eq!(packed_half(&sig, &[(8, None)], 8, 0), None);
+    }
+
+    /// A program's constant table starts after its instructions, unless a
+    /// load at a fixed offset reads below that.
+    #[test]
+    fn the_code_table_starts_after_the_instructions() {
+        // s_nop 0, s_endpgm, then 1,000 dwords of constants.
+        let mut words = vec![0xBF80_0000, S_ENDPGM];
+        words.extend(0..1000u32);
+        let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let p = ir::build(&code, false, 256).unwrap();
+        let at = |offset: u32, dynamic: bool| resource::Address {
+            param: resource::CODE,
+            offset,
+            dynamic: dynamic.then_some(ir::Value(0)),
+        };
+        let (computed, fixed_after, fixed_inside) = (at(0, true), at(12, false), at(4, false));
+        // A load at a computed offset from the code's start: the table is
+        // the constants only, not the whole program.
+        assert_eq!(code_table_start(&p, &[&computed], 0), 8);
+        assert_eq!(code_table_start(&p, &[&computed, &fixed_after], 0), 8);
+        // A load at a fixed offset inside the instructions keeps the start.
+        assert_eq!(code_table_start(&p, &[&computed, &fixed_inside], 0), 0);
+        // Loads past the instructions only: from the lowest of them.
+        assert_eq!(code_table_start(&p, &[&fixed_after], 12), 12);
     }
 
     /// Whether a synthetic compute program translates with these input registers.

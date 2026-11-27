@@ -161,12 +161,30 @@ if ($Turbo -and !$Safe) {
     # 2026-11-27 23:50 had 2.4 GB of them in the card's share of the PC's
     # memory, which ran out as the heist began (7.7 of 7.5 GB)
     $settings['VICTORY_CARD_PLAIN'] = '1'
-    # the water's two tiled light programs left out (on 32-lane waves they
-    # translate approximately and leave blocks of tiles dark, which flicker:
-    # trustno1-coder/VIctory-NVIDIA 35c15608): run 2026-11-28 01:41 had them
-    # at 2-42 ms of the card a frame, the water flickering. The water near a
-    # boat is darker without them (edsuuu/VI-BR-PORT 6d5079cf).
-    $settings['VICTORY_WATER_LIGHT'] = '0'
+    # (Not VICTORY_WATER_LIGHT=0: run 2026-11-28 02:12 had half of the water
+    # black without the water's tiled light; it runs, flicker and all.)
+    # Tuning of crossducking/RAZDA4A-XEN's presets, made on a 6-core PC with
+    # 16 GB (each switch is this build's own, see its doc comment):
+    # the pass that uploads textures picked by index within 8 ms a frame,
+    # not 250, and without the backlog's triple budget (it took 14-45 ms a
+    # frame of the submitting thread in run 02:12); presents two in the line
+    # (a present waited 34-47 ms for the one before it to be sent); barrier
+    # calls joined; the wide helpers kept awake 100 us; pieces an earlier
+    # fetch holds left out; a placed copy refuses a submission only where
+    # it stands behind what the card does in front; 16 parts joined;
+    # 6 threads translating lists, not 8 (the 6 cores have the title's
+    # threads, the submitting one and three landing ones too); the write
+    # watch asked on several threads.
+    $settings['VICTORY_TEXTURE_STAGE_MS'] = '8'
+    $settings['VICTORY_TEXTURE_CATCHUP'] = '0'
+    $settings['VICTORY_SUBMIT_FRAMES'] = '2'
+    $settings['VICTORY_JOIN_BARRIERS'] = '1'
+    $settings['VICTORY_WIDE_SPIN'] = '100'
+    $settings['VICTORY_LAND_SKIP'] = '1'
+    $settings['VICTORY_PLACED_ORDER'] = '1'
+    $settings['VICTORY_JOIN_PARTS'] = '16'
+    $settings['VICTORY_THIN_THREADS'] = '6'
+    $settings['VICTORY_ASK_SPREAD'] = '1'
     # what shaders write into title memory the title asked for as
     # write-combined (which the console's CPU writes, not reads) stays on the
     # card, not copied back (crossducking/RAZDA4A-XEN: copy-back 27 -> 0.5 MB
