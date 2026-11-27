@@ -109,6 +109,8 @@ pub mod titlewrite;
 mod upload;
 #[cfg(windows)]
 mod watch;
+mod wc;
+pub use wc::title_memory_protection;
 #[cfg(windows)]
 mod texback;
 

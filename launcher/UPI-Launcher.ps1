@@ -167,6 +167,11 @@ if ($Turbo -and !$Safe) {
     # at 2-42 ms of the card a frame, the water flickering. The water near a
     # boat is darker without them (edsuuu/VI-BR-PORT 6d5079cf).
     $settings['VICTORY_WATER_LIGHT'] = '0'
+    # what shaders write into title memory the title asked for as
+    # write-combined (which the console's CPU writes, not reads) stays on the
+    # card, not copied back (crossducking/RAZDA4A-XEN: copy-back 27 -> 0.5 MB
+    # a frame on a 6-core PC with 16 GB; here 28-37 MB and 33-49 ms a frame)
+    $settings['VICTORY_WC_NO_BACK'] = '1'
     # (VICTORY_LAND_THREADS=6 was tried in run 2026-11-26 23:30: the landings
     # took as long as with the default 3, waiting on title memory that pages.)
     # (Neptune by Dolberth's smart copy-back, VICTORY_SMART_COPY_BACK=1, is

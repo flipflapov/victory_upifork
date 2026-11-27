@@ -53,6 +53,11 @@ pub(crate) struct Shadow {
     /// Ranges shaders of a submission not yet copied back may be writing:
     /// title memory there is older than the copy.
     pending: Mutex<Vec<(usize, usize)>>,
+    /// With `VICTORY_WC_NO_BACK=1`: ranges shaders wrote and that were not
+    /// copied back ([`crate::wc::no_back`]): title memory there is older
+    /// than the copy for good, so a refresh that cannot tell what the CPU
+    /// wrote (not watched) leaves them out.
+    card_owned: Mutex<crate::wc::Ranges>,
     /// With [`relay`]: how many submissions not yet copied back declared
     /// each range of `pending` ([`Flights`]). Locked inside `pending`'s
     /// lock.
@@ -3294,6 +3299,29 @@ impl Shadow {
         self.watched.load(Ordering::Relaxed) == NOT_WATCHED
     }
 
+    /// Whether the memory behind the copy is write-watched, by the kernel
+    /// or the guards, as of its last refresh (not before the first).
+    pub(crate) fn watched_known(&self) -> bool {
+        matches!(self.watched.load(Ordering::Relaxed), 1 | GUARDED)
+    }
+
+    /// Shaders write `[address, address + len)` and it is not copied back
+    /// (`VICTORY_WC_NO_BACK`, [`crate::wc::skip_back`]): the copy holds the
+    /// newest bytes there from now on (see [`Shadow::update`]).
+    pub(crate) fn card_owns(&self, address: usize, len: usize) {
+        let (start, end) = (self.start as usize, (self.start + self.len) as usize);
+        let (from, to) = (address.max(start), (address + len).min(end));
+        if from >= to {
+            return;
+        }
+        self.card_owned.lock().unwrap_or_else(|e| e.into_inner()).add(from, to);
+        // Title memory there holds older bytes than the card: a refresh of a
+        // part the CPU wrote sends up only the dwords it changed, if asked.
+        if self.card.is_some() && crate::wc::keep_stores() {
+            self.keep_stores();
+        }
+    }
+
     /// Whether a submission asks the kernel about the copy's ranges ahead:
     /// not of memory that is not watched, nor of view memory, which the
     /// kernel would refuse (and with it the ranges asked about together).
@@ -3364,6 +3392,7 @@ impl Shadow {
             ranged: Mutex::default(),
             watched: AtomicU8::new(0),
             pending: Mutex::default(),
+            card_owned: Mutex::default(),
             flights: Mutex::default(),
             before: Mutex::default(),
             merging: RwLock::default(),
@@ -4136,6 +4165,20 @@ impl Shadow {
             .copied()
             .filter(|&(a, e)| a < to && e > from)
             .collect();
+        // Ranges the card keeps (`VICTORY_WC_NO_BACK`): left out where the
+        // write watch cannot say which pages the CPU wrote, so a whole copy
+        // would put the title's old bytes over what shaders wrote.
+        if !self.watched_known() {
+            let owned = self.card_owned.lock().unwrap_or_else(|e| e.into_inner());
+            if !owned.is_empty() {
+                let before = busy.len();
+                busy.extend(owned.overlapping(from, to));
+                let left: usize = busy[before..].iter().map(|&(a, e)| e.min(to) - a.max(from)).sum();
+                if left != 0 {
+                    crate::wc::unwatched(left as u64);
+                }
+            }
+        }
         if !busy.is_empty() {
             // Around ranges shaders are writing: the gaps, each as below
             // (in the world most submissions have such ranges; copying the

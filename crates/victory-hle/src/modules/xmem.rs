@@ -196,6 +196,9 @@ pub extern "system" fn XMemVirtualAlloc(
 /// each, with how much so far. (For placing it: memory the CPU reaches
 /// uncached or write-combined is memory it does not read.)
 fn note_protection(protect: u32, kind: u32, flags: u64, at: usize, size: usize) {
+    // (For `VICTORY_WC_NO_BACK`: what shaders write into write-combined
+    // memory stays on the card.)
+    victory_gpu::title_memory_protection(at, size, protect);
     type Seen = std::collections::HashMap<(u32, u32, u64), (u64, usize)>;
     static SEEN: std::sync::Mutex<Option<Seen>> = std::sync::Mutex::new(None);
     let (n, bytes) = {
