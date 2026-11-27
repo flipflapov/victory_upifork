@@ -610,8 +610,9 @@ fn memory_line() {
     tracing::info!(
         "memory, ours: host copies of title memory {} MB ({} alive, in the PC's or the card's; windows outside buffers {} MB), snapshot \
          buffers kept {} MB; texture staging {} MB; blocks of textures {} MB, of their staging {} MB; lists' scratch {} MB, \
-         spare {} MB, their other uploads {} MB; host lists {} alive, {} never reset; copies in the card's memory {} MB; \
-         shader containers {} MB, translations {} MB, the pipeline library's file {} MB",
+         spare {} MB, their other uploads {} MB; host lists {} alive, {} never reset; copies in the card's memory {} MB \
+         (their CPU sides in plain memory of ours, VICTORY_CARD_PLAIN: {} MB); shader containers {} MB, translations {} MB, the \
+         pipeline library's file {} MB",
         mb(copies[1]),
         copies[0],
         mb(copies[3]),
@@ -625,6 +626,7 @@ fn memory_line() {
         alive[0],
         lists[3],
         mb(crate::shadow::live_span_bytes()),
+        mb(crate::shadow::PLAIN_BYTES.load(Ordering::Relaxed)),
         mb(kept[1]),
         mb(kept[3]),
         mb(kept[4])
@@ -1004,6 +1006,12 @@ unsafe fn execute_lists(queue: &ID3D12CommandQueue, lists: &[Option<ID3D12Comman
         // SAFETY: the caller's.
         unsafe { queue.ExecuteCommandLists(&sent) };
     }
+}
+
+/// Whether what goes up to copies in the card's memory goes from each
+/// submission's own memory (`VICTORY_SEND_OWN`, the default).
+pub(crate) fn sends_own() -> bool {
+    send::own()
 }
 
 /// Work of ours left out for want of memory (`what`): said the first time
@@ -5072,7 +5080,7 @@ impl Host {
                         let sides: Vec<_> = dirty.iter().map(|(shadow, _)| shadow.card_sides()).collect();
                         let mut ranges: Vec<upq::Range<'_>> = Vec::new();
                         for ((shadow, rs), side) in dirty.iter().zip(&sides) {
-                            if let Some((staging, _, _)) = side {
+                            if let Some((Some(staging), _, _)) = side {
                                 ranges.extend(rs.iter().map(|&(a, b)| (&shadow.buffer, a as u64, *staging, (b - a) as u64)));
                             }
                         }
@@ -5085,7 +5093,19 @@ impl Host {
                         let Some((staging, before, _)) = shadow.card_sides() else {
                             continue;
                         };
-                        if own.is_none() && up.is_none() {
+                        // A CPU side the card cannot copy from (plain memory,
+                        // `crate::shadow::plain_sides`) and no memory of the
+                        // submission's own to send from: with the next one.
+                        if own.is_none() && staging.is_none() {
+                            for &(from, to) in ranges {
+                                shadow.resend(from, to);
+                            }
+                            continue;
+                        }
+                        if own.is_none()
+                            && up.is_none()
+                            && let Some(staging) = staging
+                        {
                             for &(a, b) in ranges {
                                 list.CopyBufferRegion(&shadow.buffer, a as u64, staging, a as u64, (b - a) as u64);
                             }

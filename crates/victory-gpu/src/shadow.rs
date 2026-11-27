@@ -110,7 +110,7 @@ struct Card {
     /// The CPU's side, in the PC's memory: what `data` maps. Title memory
     /// is copied into it as into any copy, and what changed in it goes to
     /// the card's side before the next submission.
-    staging: ID3D12Resource,
+    staging: CpuSide,
     /// The card side's bytes as they were when the submission's shaders
     /// started, in the card's memory too: made when shader writes are
     /// first declared for the copy, and compared with the card's side, on
@@ -131,6 +131,108 @@ struct Card {
     me: std::sync::OnceLock<std::sync::Weak<Shadow>>,
     /// The buffers' bytes (the title buffer's, rounded up to 64 KiB).
     size: u64,
+}
+
+/// The CPU's side of a copy in the card's memory ([`Card::staging`]).
+enum CpuSide {
+    /// A buffer of the PC's memory the card can copy from, mapped.
+    Buffer(ID3D12Resource),
+    /// Plain memory of the process, which the card never reads ([`plain_sides`]).
+    Plain(Plain),
+}
+
+impl CpuSide {
+    /// The buffer the card can copy from, if it is one.
+    fn buffer(&self) -> Option<&ID3D12Resource> {
+        match self {
+            CpuSide::Buffer(b) => Some(b),
+            CpuSide::Plain(_) => None,
+        }
+    }
+}
+
+/// Committed memory of the process (`VirtualAlloc`), freed with it.
+struct Plain(usize, usize);
+
+// SAFETY: memory of our own, which `Shadow::data` names; who writes it is
+// the copy's own business, as with a mapping.
+unsafe impl Send for Plain {}
+// SAFETY: as above.
+unsafe impl Sync for Plain {}
+
+impl Plain {
+    /// `len` bytes, zeros, or `None`.
+    fn new(len: u64) -> Option<Plain> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Memory as mem;
+            let len = usize::try_from(len).ok()?;
+            // SAFETY: a plain allocation of our own.
+            let at = unsafe { mem::VirtualAlloc(std::ptr::null(), len, mem::MEM_RESERVE | mem::MEM_COMMIT, mem::PAGE_READWRITE) };
+            (!at.is_null()).then(|| {
+                PLAIN_BYTES.fetch_add(len as u64, Ordering::Relaxed);
+                Plain(at as usize, len)
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = len;
+            None
+        }
+    }
+
+    fn data(&self) -> *mut u8 {
+        self.0 as *mut u8
+    }
+}
+
+impl Drop for Plain {
+    fn drop(&mut self) {
+        PLAIN_BYTES.fetch_sub(self.1 as u64, Ordering::Relaxed);
+        #[cfg(windows)]
+        // SAFETY: our allocation, which nothing names now (its copy is gone).
+        unsafe {
+            windows_sys::Win32::System::Memory::VirtualFree(self.0 as *mut _, 0, windows_sys::Win32::System::Memory::MEM_RELEASE);
+        }
+    }
+}
+
+/// Bytes of [`Plain`] CPU sides alive.
+pub(crate) static PLAIN_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the CPU's side of a copy in the card's memory is plain memory of
+/// the process rather than a buffer the card could copy from
+/// (`VICTORY_CARD_PLAIN=1`; off by default): with the sends taken from the
+/// submission's own memory (`VICTORY_SEND_OWN`, the default) the card never
+/// reads it. A buffer of the PC's memory a card can read stays in RAM, and
+/// counts against the share of it the card may hold (7.5 GB on 16 GB): run
+/// 2026-11-27 23:50 had 2.4 GB of such CPU sides there, and the share ran
+/// out as the heist began. Plain memory can be paged out. Where a
+/// submission has no memory of its own for its sends, what changed in such
+/// a copy goes up with the next one.
+pub(crate) fn plain_sides() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var_os("VICTORY_CARD_PLAIN").is_some_and(|v| v == "1") && crate::host::sends_own();
+        if on {
+            tracing::info!("the CPU's sides of copies in the card's memory are plain memory of ours (VICTORY_CARD_PLAIN=1)");
+        }
+        on
+    })
+}
+
+/// The CPU's side of a copy of `size` bytes, given a card side: plain
+/// memory with [`plain_sides`], else a buffer of the PC's memory (made with
+/// `shared`). With its mapping.
+fn cpu_side(size: u64, shared: impl FnOnce() -> Option<(ID3D12Resource, *mut u8)>) -> Option<(CpuSide, *mut u8)> {
+    if plain_sides()
+        && let Some(plain) = Plain::new(size)
+    {
+        let data = plain.data();
+        return Some((CpuSide::Plain(plain), data));
+    }
+    let (buffer, data) = shared()?;
+    Some((CpuSide::Buffer(buffer), data))
 }
 
 /// Whether the host copies of big title buffers are in the card's own
@@ -4528,12 +4630,13 @@ impl Shadow {
         self.card.as_ref().map_or_else(Vec::new, |c| c.dirty.lock().unwrap_or_else(|e| e.into_inner()).clone())
     }
 
-    /// Of a copy in the card's memory: the CPU's side (PC memory), the
-    /// card side's bytes from before if made yet, and their size.
-    pub(crate) fn card_sides(&self) -> Option<(&ID3D12Resource, Option<ID3D12Resource>, u64)> {
+    /// Of a copy in the card's memory: the CPU's side (PC memory) if the
+    /// card can copy from it ([`plain_sides`]), the card side's bytes from
+    /// before if made yet, and their size.
+    pub(crate) fn card_sides(&self) -> Option<(Option<&ID3D12Resource>, Option<ID3D12Resource>, u64)> {
         let card = self.card.as_ref()?;
         let before = card.before.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        Some((&card.staging, before, card.size))
+        Some((card.staging.buffer(), before, card.size))
     }
 
     /// Shader writes are declared for a copy in the card's memory: makes
@@ -4825,7 +4928,7 @@ impl Shadow {
         let mut shadow = Shadow::new(none(), data, 0, start, len);
         if card {
             shadow.card = Some(Card {
-                staging: none(),
+                staging: CpuSide::Buffer(none()),
                 before: Mutex::default(),
                 dirty: Mutex::default(),
                 sent: Mutex::default(),
@@ -4982,7 +5085,7 @@ mod land_tests {
         unsafe { std::ptr::write_bytes(data, 0, len) };
         let mut shadow = Shadow::new(buffer.clone(), data, 0, title as u64, len as u64);
         shadow.card = Some(Card {
-            staging: buffer,
+            staging: super::CpuSide::Buffer(buffer),
             before: Mutex::default(),
             dirty: Mutex::default(),
             sent: Mutex::default(),
@@ -5396,11 +5499,14 @@ fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
             entry.shadow = Some(Arc::new(Shadow::placed(placed, key.0, len, false)));
             return entry.shadow.clone();
         }
-        let (buffer, data) = host()?.shared_buffer(size)?;
-        crate::host::name(&buffer, || format!("title buffer {:#x}+{len:#x}", key.0));
         // A big one, with `cards`: shaders get a buffer in the card's own
-        // memory, and the one just made is the CPU's side.
-        let (buffer, card) = match card_for(size) {
+        // memory, and the CPU's side is another (`cpu_side`).
+        let shared = || {
+            let made = host()?.shared_buffer(size)?;
+            crate::host::name(&made.0, || format!("title buffer {:#x}+{len:#x}", key.0));
+            Some(made)
+        };
+        let (buffer, data, card) = match card_for(size) {
             Some(on_card) => {
                 crate::host::name(&on_card, || format!("title buffer {:#x}+{len:#x} on the card", key.0));
                 tracing::info!(
@@ -5408,18 +5514,22 @@ fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
                     len,
                     "a buffer's host copy is in the card's memory"
                 );
+                let (staging, data) = cpu_side(size, shared)?;
                 let card = Card {
-                    staging: buffer,
+                    staging,
                     before: Mutex::default(),
                     dirty: Mutex::default(),
                     sent: Mutex::default(),
-                touched: Default::default(),
-                me: Default::default(),
+                    touched: Default::default(),
+                    me: Default::default(),
                     size,
                 };
-                (on_card, Some(card))
+                (on_card, data, Some(card))
             }
-            None => (buffer, None),
+            None => {
+                let (buffer, data) = shared()?;
+                (buffer, data, None)
+            }
         };
         // SAFETY: a live buffer.
         let gpu = unsafe { buffer.GetGPUVirtualAddress() };
@@ -5638,7 +5748,7 @@ pub(crate) fn by_address(start: u64, len: u64) -> Option<Arc<Shadow>> {
     shadow.window = true;
     shadow.changes_only.store(true, Ordering::Relaxed);
     shadow.card = Some(Card {
-        staging,
+        staging: CpuSide::Buffer(staging),
         before: Mutex::default(),
         dirty: Mutex::default(),
         sent: Mutex::default(),
@@ -5720,15 +5830,19 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
         map.insert((start, len), shadow.clone());
         return Some(shadow);
     }
-    let (buffer, data) = host()?.shared_buffer(len)?;
-    crate::host::name(&buffer, || format!("title memory {start:#x}+{len:#x}"));
+    let shared = || {
+        let made = host()?.shared_buffer(len)?;
+        crate::host::name(&made.0, || format!("title memory {start:#x}+{len:#x}"));
+        Some(made)
+    };
     // With room for windows on the card (`window_card_most`): shaders get a
-    // buffer there, and the one just made is the CPU's side.
-    let (buffer, card) = match window_card_for(len) {
+    // buffer there, and the CPU's side is another (`cpu_side`).
+    let (buffer, data, card) = match window_card_for(len) {
         Some(on_card) => {
             crate::host::name(&on_card, || format!("title memory {start:#x}+{len:#x} on the card"));
+            let (staging, data) = cpu_side(len, shared)?;
             let card = Card {
-                staging: buffer,
+                staging,
                 before: Mutex::default(),
                 dirty: Mutex::default(),
                 sent: Mutex::default(),
@@ -5736,9 +5850,12 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
                 me: Default::default(),
                 size: len,
             };
-            (on_card, Some(card))
+            (on_card, data, Some(card))
         }
-        None => (buffer, None),
+        None => {
+            let (buffer, data) = shared()?;
+            (buffer, data, None)
+        }
     };
     // SAFETY: a live buffer.
     let gpu = unsafe { buffer.GetGPUVirtualAddress() };

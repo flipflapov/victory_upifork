@@ -148,6 +148,12 @@ if ($Turbo -and !$Safe) {
     # 22:25: the drawing queue spent 22-50 ms a frame bringing those copies
     # up to date, ~50 MB a frame across the bus, doing nothing else)
     $settings['VICTORY_UP_QUEUE'] = '1'
+    # the CPU's sides of copies in the card's memory in plain memory of ours,
+    # which can be paged out, not in buffers the card could read (it never
+    # reads them with the sends from each submission's own memory): run
+    # 2026-11-27 23:50 had 2.4 GB of them in the card's share of the PC's
+    # memory, which ran out as the heist began (7.7 of 7.5 GB)
+    $settings['VICTORY_CARD_PLAIN'] = '1'
     # (VICTORY_LAND_THREADS=6 was tried in run 2026-11-26 23:30: the landings
     # took as long as with the default 3, waiting on title memory that pages.)
     # (Neptune by Dolberth's smart copy-back, VICTORY_SMART_COPY_BACK=1, is
