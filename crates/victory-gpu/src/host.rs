@@ -1525,6 +1525,8 @@ pub(crate) struct HostList {
     /// and at the end, and where they are read back.
     #[cfg(feature = "diagnostics")]
     stamps: OnceLock<Option<(ID3D12QueryHeap, ID3D12Resource)>>,
+    /// Where the card's time goes in it ([`cardtime`]).
+    card: Mutex<cardtime::Marks>,
 }
 
 /// A list's prelude: an allocator and a closed list.
@@ -4372,6 +4374,7 @@ fn late_line(frames: f64) {
 
 pub(crate) mod aside;
 pub(crate) mod awake;
+pub(crate) mod cardtime;
 mod card_steps;
 #[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
 pub(crate) mod indirects;
@@ -4785,7 +4788,7 @@ impl Host {
                     ),
                 );
             }
-            Ok(HostList {
+            let made = HostList {
                 allocator,
                 list: rec::Rec::new(list),
                 deferred: Mutex::default(),
@@ -4807,7 +4810,10 @@ impl Host {
                 notes,
                 #[cfg(feature = "diagnostics")]
                 stamps: OnceLock::new(),
-            })
+                card: Mutex::default(),
+            };
+            made.card_mark(cardtime::START, 0);
+            Ok(made)
         }
     }
 
@@ -5004,6 +5010,7 @@ impl Host {
                 (|| -> windows::core::Result<()> {
                     allocator.Reset()?;
                     list.Reset(allocator, None)?;
+                    cardtime::other_begin(list, cardtime::SYNC);
                     if upcheck::on() {
                         looks = upcheck::record(self, list, &dirty);
                     }
@@ -5108,6 +5115,7 @@ impl Host {
                             card_pass(list, &run, size as u32, 0, 0);
                         }
                     }
+                    cardtime::other_end(list);
                     list.Close()?;
                     self.queue.ExecuteCommandLists(&[Some(list.cast()?)]);
                     Ok(())
@@ -5196,6 +5204,7 @@ impl Host {
                 (|| -> windows::core::Result<ID3D12CommandList> {
                     allocator.Reset()?;
                     list.Reset(allocator, None)?;
+                    cardtime::other_begin(list, cardtime::CHECK);
                     // What the submission's shaders wrote, first.
                     list.ResourceBarrier(&[D3D12_RESOURCE_BARRIER {
                         Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
@@ -5220,6 +5229,7 @@ impl Host {
                         card_pass(list, &r.span, size as u32, r.at, if flown && !r.picked { 2 } else { 1 });
                         CARD_PASSES[2].fetch_add(1, Ordering::Relaxed);
                     }
+                    cardtime::other_end(list);
                     list.Close()?;
                     list.cast()
                 })()
@@ -6386,6 +6396,7 @@ impl Host {
                     _ => crate::copystat::Timed::Title(_run),
                 },
             ));
+            list.card_submitted(own.as_ref().is_some_and(|own| std::ptr::eq(own.list(), *list)));
             lists.push(list.list.cast().ok());
         }
         batch.fill();
@@ -7041,6 +7052,7 @@ impl HostList {
 
     pub(crate) fn close(&self) {
         let _closing = crate::timeline::span("closing a host list");
+        self.card_mark(cardtime::CLOSE, 0);
         self.twins_to_depth();
         self.textures_back();
         let scratch = self.indirect_args.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -7059,6 +7071,7 @@ impl HostList {
                 self.list.ResolveQueryData(heap, D3D12_QUERY_TYPE_TIMESTAMP, 0, count + 1, back, 0);
             }
         }
+        self.card_end();
         // SAFETY: our list.
         if let Err(e) = unsafe { self.list.Close() } {
             fail(format_args!(
@@ -7092,6 +7105,8 @@ impl HostList {
     /// Only after the list's last submission finished (every one is waited
     /// for).
     pub(crate) fn reset(&self) {
+        // (Every submission of it has run: its stamps are there.)
+        self.card_account();
         self.changed_something();
         #[cfg(feature = "diagnostics")]
         let started = std::time::Instant::now();
@@ -7129,6 +7144,7 @@ impl HostList {
         if let Err(e) = reset {
             fail(format_args!("a host command list did not reset ({e})"));
         }
+        self.card_mark(cardtime::START, 0);
         // Reuse only after the old native commands have been discarded.
         drop(texture_backs);
         #[cfg(feature = "diagnostics")]

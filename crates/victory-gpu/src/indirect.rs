@@ -437,6 +437,7 @@ fn clamp_into(
     ahead: bool,
 ) -> bool {
     let before = list.indirect_state(dst);
+    list.card_mark(crate::host::cardtime::CLAMP, 0);
     let recorded = record_clamp_as(c, &list.list, (dst, before), budget, src, count, spec, ahead);
     if recorded {
         list.indirect_readable(dst);
@@ -600,6 +601,7 @@ pub(crate) fn open_batch(
     }
     #[cfg(feature = "diagnostics")]
     crate::copystat::add(crate::copystat::C::IndirectBounded, 1);
+    list.card_mark(crate::host::cardtime::CLAMP, 0);
     batch::record(c, &list.list, (&dst, before), budget, sources, jobs);
     // SAFETY: the list's own upload memory of that many bytes, 256-byte
     // aligned, until it is reset.

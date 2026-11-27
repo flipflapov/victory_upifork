@@ -899,6 +899,35 @@ pub(crate) static HEAP_TEXTURES_QUEUE: [AtomicU64; 5] = [const { AtomicU64::new(
 /// as before, they counted as not there at all).
 pub(crate) static HEAP_TEXTURES_PARTLY: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 static DROPPED: AtomicU64 = AtomicU64::new(0);
+/// Of [`DROPPED`], by why, since the last frame line: a stage of the
+/// ray-tracing structure builder, which is off (`VICTORY_BVH_BUILDER=1`
+/// runs it); a dispatch without a host pipeline; one that could not be
+/// bound; a draw or mesh dispatch that could not be prepared or had no
+/// host pipeline.
+static DROP_WHY: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+/// A draw or dispatch dropped, for `why` ([`DROP_WHY`]).
+fn drop_for(why: usize) {
+    DROPPED.fetch_add(1, Ordering::Relaxed);
+    DROP_WHY[why].fetch_add(1, Ordering::Relaxed);
+}
+
+/// With the frame line: [`DROP_WHY`] per frame over `frames`.
+pub(crate) fn drops_line(frames: f64) {
+    let why: [u64; 4] = std::array::from_fn(|i| DROP_WHY[i].swap(0, Ordering::Relaxed));
+    if frames <= 0.0 || why.iter().all(|&n| n == 0) {
+        return;
+    }
+    tracing::info!(
+        "draws and dispatches dropped per frame, by why: stages of the ray-tracing structure builder, which is off \
+         (VICTORY_BVH_BUILDER=1 runs it) {:.0}; dispatches without a host pipeline {:.0}; dispatches that could not be bound \
+         {:.0}; draws and mesh dispatches that could not be prepared or had no host pipeline {:.0}",
+        why[0] as f64 / frames,
+        why[1] as f64 / frames,
+        why[2] as f64 / frames,
+        why[3] as f64 / frames,
+    );
+}
 
 /// Marks the last traced draw as not run on the host.
 #[cfg(feature = "diagnostics")]
@@ -1728,6 +1757,7 @@ impl State {
         // By host object: a title pipeline released and another made at its
         // address is another host pipeline (the list keeps the old one).
         if self.host_pipeline != p.pso.as_raw() as usize {
+            list.card_pipeline(crate::host::cardtime::key(&p.pso), &p.name);
             // SAFETY: an open list and a live pipeline.
             unsafe { l.SetPipelineState(&p.pso) };
             self.host_pipeline = p.pso.as_raw() as usize;
@@ -3209,7 +3239,7 @@ impl State {
         }
         // The ray-tracing structure builder's stages run all or none.
         if crate::pipeline::is_builder(self.pipeline as This) && !crate::pipeline::builder_runs() {
-            DROPPED.fetch_add(1, Ordering::Relaxed);
+            drop_for(0);
             #[cfg(feature = "diagnostics")]
             {
                 crate::pipeline::note_why("a stage of the ray-tracing structure builder, which is off".to_owned());
@@ -3222,7 +3252,7 @@ impl State {
                 pipeline = format_args!("{:#x}", self.pipeline),
                 "a dispatch without a host pipeline dropped"
             );
-            DROPPED.fetch_add(1, Ordering::Relaxed);
+            drop_for(1);
             #[cfg(feature = "diagnostics")]
             {
                 crate::pipeline::note_drop(self.pipeline as This);
@@ -3235,7 +3265,7 @@ impl State {
             return;
         }
         if !self.bind(list, p, true) {
-            DROPPED.fetch_add(1, Ordering::Relaxed);
+            drop_for(2);
             // A stage of the structure builder that cannot be bound is a
             // dropped stage: the others stop too.
             if crate::pipeline::is_builder(self.pipeline as This) {
@@ -3624,7 +3654,7 @@ impl State {
                 Err(_) => false,
             };
         if !ran {
-            DROPPED.fetch_add(1, Ordering::Relaxed);
+            drop_for(3);
             #[cfg(feature = "diagnostics")]
             dropped(self.pipeline);
         }
@@ -4172,7 +4202,7 @@ impl State {
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }
         if !ran {
-            DROPPED.fetch_add(1, Ordering::Relaxed);
+            drop_for(3);
             #[cfg(feature = "diagnostics")]
             dropped(self.pipeline);
         }
@@ -4277,7 +4307,7 @@ impl State {
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }
         if !ran {
-            DROPPED.fetch_add(1, Ordering::Relaxed);
+            drop_for(3);
             #[cfg(feature = "diagnostics")]
             dropped(self.pipeline);
         }

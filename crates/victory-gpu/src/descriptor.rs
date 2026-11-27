@@ -755,6 +755,8 @@ pub(crate) fn sync_line(frames: f64) {
     crate::draw::indirect_cost_line(frames);
     crate::draw::prep::line(frames);
     crate::host::made_line(frames);
+    crate::host::cardtime::line(frames);
+    crate::draw::drops_line(frames);
     let [twins, moved, lost] = [0, 1, 2].map(|i| host::TWINS[i].swap(0, std::sync::atomic::Ordering::Relaxed));
     if twins > 0 {
         tracing::info!(
