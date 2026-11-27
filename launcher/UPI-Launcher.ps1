@@ -122,6 +122,13 @@ if ($Turbo -and !$Safe) {
     # 2026-11-27 00:00 had every party waiting for another, the card half
     # busy and the title 330 ms a frame at presents.
     $settings['VICTORY_GPU_ORDERED_WAITS'] = '1'
+    # Memory, from DoubleGhosty/cool_fox (Esteban Viera's switches): idle host
+    # lists none took let go after 10 s (a D3D12 allocator keeps the most its
+    # commands ever took; ~1,500 lists stand here), and at most 256 MB of send
+    # buffers kept spare instead of 768 (they count against the card's share
+    # of the PC's memory, 7.5 GB here)
+    $settings['VICTORY_LIST_IDLE_TRIM_S'] = '10'
+    $settings['VICTORY_SEND_SPARE_MB'] = '256'
     # (VICTORY_LAND_THREADS=6 was tried in run 2026-11-26 23:30: the landings
     # took as long as with the default 3, waiting on title memory that pages.)
     # (Neptune by Dolberth's smart copy-back, VICTORY_SMART_COPY_BACK=1, is
