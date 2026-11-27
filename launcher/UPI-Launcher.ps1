@@ -161,6 +161,12 @@ if ($Turbo -and !$Safe) {
     # 2026-11-27 23:50 had 2.4 GB of them in the card's share of the PC's
     # memory, which ran out as the heist began (7.7 of 7.5 GB)
     $settings['VICTORY_CARD_PLAIN'] = '1'
+    # the water's two tiled light programs left out (on 32-lane waves they
+    # translate approximately and leave blocks of tiles dark, which flicker:
+    # trustno1-coder/VIctory-NVIDIA 35c15608): run 2026-11-28 01:41 had them
+    # at 2-42 ms of the card a frame, the water flickering. The water near a
+    # boat is darker without them (edsuuu/VI-BR-PORT 6d5079cf).
+    $settings['VICTORY_WATER_LIGHT'] = '0'
     # (VICTORY_LAND_THREADS=6 was tried in run 2026-11-26 23:30: the landings
     # took as long as with the default 3, waiting on title memory that pages.)
     # (Neptune by Dolberth's smart copy-back, VICTORY_SMART_COPY_BACK=1, is

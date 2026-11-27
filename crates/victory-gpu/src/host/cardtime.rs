@@ -125,6 +125,9 @@ pub(crate) struct Marks {
     marks: Vec<(u32, u8, usize)>,
     /// The pipelines' names, by pipeline, as this recording first bound them.
     names: HashMap<usize, String>,
+    /// What each pipeline was asked to do, by pipeline: draws and dispatches,
+    /// vertices (times instances) or groups, indirect executions.
+    work: HashMap<usize, [u64; 3]>,
     /// The kind and pipeline of the last stamp.
     last: (u8, usize),
     /// Sent to the card, and as a list of a submission's own steps.
@@ -139,6 +142,7 @@ impl Default for Marks {
             blocks: Vec::new(),
             marks: Vec::new(),
             names: HashMap::new(),
+            work: HashMap::new(),
             last: (u8::MAX, 0),
             submitted: false,
             own: false,
@@ -168,8 +172,9 @@ impl Marks {
 /// counted, stamps, lists left out, clamps.
 static BY_KIND: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
 static COUNTS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
-/// Ticks and stamps by pipeline, with its name.
-static BY_PIPELINE: Mutex<Option<HashMap<usize, (u64, u64, String)>>> = Mutex::new(None);
+/// Ticks and stamps by pipeline, with its name and its work ([`Marks::work`]).
+#[allow(clippy::type_complexity)]
+static BY_PIPELINE: Mutex<Option<HashMap<usize, (u64, u64, String, [u64; 3])>>> = Mutex::new(None);
 
 impl HostList {
     /// What runs from here on in the list is of `kind` (and pipeline `pso`).
@@ -186,6 +191,24 @@ impl HostList {
         unsafe { self.list.EndQuery(&ring.heap, D3D12_QUERY_TYPE_TIMESTAMP, slot) };
         m.marks.push((slot, kind, pso));
         m.last = (kind, pso);
+    }
+
+    /// A draw or dispatch of the pipeline bound last: `units` vertices
+    /// (times instances) or groups, or an indirect execution (its count is
+    /// the card's).
+    pub(crate) fn card_work(&self, units: u64, indirect: bool) {
+        if ring().is_none() {
+            return;
+        }
+        let mut m = self.card.lock().unwrap_or_else(|e| e.into_inner());
+        let (kind, pso) = m.last;
+        if kind != PIPELINE {
+            return;
+        }
+        let w = m.work.entry(pso).or_default();
+        w[0] += 1;
+        w[1] += units;
+        w[2] += u64::from(indirect);
     }
 
     /// A pipeline of the title's runs from here on.
@@ -289,9 +312,14 @@ impl HostList {
         let mut all = BY_PIPELINE.lock().unwrap_or_else(|e| e.into_inner());
         let all = all.get_or_insert_with(HashMap::new);
         for (pso, (ticks, stamps)) in by {
-            let e = all.entry(pso).or_insert_with(|| (0, 0, m.names.get(&pso).cloned().unwrap_or_default()));
+            let e = all.entry(pso).or_insert_with(|| (0, 0, m.names.get(&pso).cloned().unwrap_or_default(), [0; 3]));
             e.0 += ticks;
             e.1 += stamps;
+            if let Some(w) = m.work.get(&pso) {
+                for (sum, n) in e.3.iter_mut().zip(w) {
+                    *sum += n;
+                }
+            }
         }
     }
 }
@@ -388,15 +416,22 @@ pub(crate) fn line(frames: f64) {
     }
     let ms = |ticks: u64| ticks as f64 * 1e3 / ring.frequency.max(1) as f64 / frames;
     let total: u64 = kinds.iter().sum();
-    let mut top: Vec<(usize, (u64, u64, String))> = by.into_iter().collect();
+    let mut top: Vec<(usize, (u64, u64, String, [u64; 3]))> = by.into_iter().collect();
     top.sort_unstable_by(|a, b| b.1.0.cmp(&a.1.0));
     let pipelines = top.len();
     let text: Vec<String> = top
         .iter()
         .take(12)
-        .map(|(_, (ticks, stamps, name))| {
+        .map(|(_, (ticks, stamps, name, work))| {
             let name: String = name.chars().take(120).collect();
-            format!("{name} {:.2} ms ({:.0}x)", ms(*ticks), *stamps as f64 / frames)
+            format!(
+                "{name} {:.2} ms ({:.0}x; {:.0} draws or dispatches, {:.0} vertices or groups, {:.0} indirect)",
+                ms(*ticks),
+                *stamps as f64 / frames,
+                work[0] as f64 / frames,
+                work[1] as f64 / frames,
+                work[2] as f64 / frames
+            )
         })
         .collect();
     tracing::info!(

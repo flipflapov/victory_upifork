@@ -3315,6 +3315,7 @@ impl State {
                 unsafe { list.list.SetComputeRoot32BitConstant(param, threads[0], word) };
             }
         }
+        list.card_work(u64::from(x) * u64::from(y) * u64::from(z), false);
         // SAFETY: an open list with everything set.
         unsafe { list.list.Dispatch(x, y, z) };
         self.buffers_written();
@@ -3662,6 +3663,7 @@ impl State {
                     if x > 65_535 {
                         once!(x, "a mesh dispatch of more groups than the host takes: cut");
                     }
+                    list.card_work(u64::from(x.min(65_535)), false);
                     // SAFETY: an open list with everything set.
                     unsafe { l6.DispatchMesh(x.min(65_535), 1, 1) };
                     self.drew(crate::pipeline::host_pipeline(self.pipeline as This));
@@ -4211,6 +4213,7 @@ impl State {
             };
             #[cfg(feature = "diagnostics")]
             list.note_op(|| self.op_text(format!("draw {count}x{instances}"), false));
+            list.card_work(u64::from(count) * u64::from(instances), false);
             // SAFETY: an open list with everything set.
             unsafe {
                 list.list
@@ -4316,6 +4319,7 @@ impl State {
         if ran {
             #[cfg(feature = "diagnostics")]
             list.note_op(|| self.op_text(format!("indexed {indices}x{instances}"), false));
+            list.card_work(u64::from(indices) * u64::from(instances), false);
             // SAFETY: an open list with everything set.
             unsafe {
                 list.list
@@ -4643,6 +4647,7 @@ impl State {
         if kind == MESH {
             self.mesh_scissor(list, true);
         }
+        list.card_work(0, true);
         // SAFETY: an open list with everything set; the scratch buffer and
         // host copies are kept alive by the list, and the signature is cached.
         unsafe {
