@@ -89,6 +89,13 @@ $settings = [ordered]@{
     # cutscenes). Part of the shader translation: set in every mode, or each
     # change of mode would translate every shader again.
     VICTORY_RT_MISS             = '1'
+    # the title's output at 1920x1080 (the screen here), not 3840x2160: it
+    # renders at 2/3 of its output, so 1280x720 instead of 2560x1440, four
+    # times fewer pixels, and its 4K picture was scaled down to the window
+    # anyway (run 2026-11-28 00:42: one water draw 31-41 ms of the card, the
+    # card 130-160 ms a frame). As edsuuu/VI-BR-PORT and VIctory-NVIDIA run.
+    VICTORY_OUTPUT              = '1920x1080'
+    VICTORY_DISPLAY_MODE        = '1920x1080'
     # the frame statistics line (fps, ms/frame) and the memory lines in the
     # log (VICTORY_BLOBS_LOG=1 adds the shaders that do not translate and
     # what the pipeline methods 0x1c8 and 0x218 are given, as base64)
