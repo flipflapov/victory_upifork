@@ -1374,3 +1374,6 @@ fn both_host_waves_observe_the_lds_flag_after_the_join() {
     }
     eprintln!("all 14 flag dispatches passed on a 32-lane hardware adapter");
 }
+
+#[path = "paired_tests.rs"]
+mod paired;
