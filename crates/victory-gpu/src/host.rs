@@ -3513,13 +3513,10 @@ fn fill_is_titles(src: usize, len: usize) -> bool {
 /// Diagnostics: the waits for flights, by what waited, why it was not done
 /// on the card ([`card_steps`]), its bytes, and the declared write it lies
 /// in (start, bytes).
-#[cfg(feature = "diagnostics")]
 type Blamed = (&'static str, &'static str, usize, usize, usize);
 /// How often and how long, and the address the last one read.
-#[cfg(feature = "diagnostics")]
 static BLAME: Mutex<Option<std::collections::HashMap<Blamed, (u64, u64, usize)>>> = Mutex::new(None);
 /// What the wait that comes next is for, and why not on the card.
-#[cfg(feature = "diagnostics")]
 static BLAMED: Mutex<(Option<(Blamed, usize)>, &'static str)> = Mutex::new((None, ""));
 
 /// Diagnostics: shader writes declared over a megabyte or more: the range
@@ -3553,7 +3550,6 @@ pub(crate) fn wide_write(address: u64, len: u64, pipeline: usize) {
     e.0 += 1;
 }
 
-#[cfg(feature = "diagnostics")]
 fn blame(kind: &'static str, written: &[(usize, usize)], at: usize, len: usize) {
     let i = written.partition_point(|r| r.1 <= at);
     let (from, to) = written.get(i).copied().unwrap_or((0, 0));
@@ -3563,24 +3559,25 @@ fn blame(kind: &'static str, written: &[(usize, usize)], at: usize, len: usize) 
 }
 
 /// Why [`card_steps`] left the submission to the wait that comes next.
-#[cfg(feature = "diagnostics")]
 fn refused(why: &'static str) {
     *BLAMED.lock().unwrap_or_else(|e| e.into_inner()) = (None, why);
 }
 
 /// The wait that comes next is for these ranges ([`stale_under_flights`]).
-#[cfg(feature = "diagnostics")]
 fn blame_stale(stale: &[(std::sync::Arc<crate::shadow::Shadow>, usize, usize)]) {
     if let Some((shadow, from, _)) = stale.first() {
         let (start, len) = shadow.span();
-        let key = ("title memory changed under shader writes", crate::shadow::stale_why(), 0, start as usize, len as usize);
+        #[cfg(feature = "diagnostics")]
+        let why = crate::shadow::stale_why();
+        #[cfg(not(feature = "diagnostics"))]
+        let why = "";
+        let key = ("title memory changed under shader writes", why, 0, start as usize, len as usize);
         BLAMED.lock().unwrap_or_else(|e| e.into_inner()).0 = Some((key, *from));
     }
 }
 
 /// The wait for what [`blame`] last named, or a wait of another reason than
 /// title memory read, took `us`.
-#[cfg(feature = "diagnostics")]
 fn blamed(why: usize, us: u64) {
     let (named, refused) = std::mem::take(&mut *BLAMED.lock().unwrap_or_else(|e| e.into_inner()));
     let (key, at) = match (why, named) {
@@ -3605,10 +3602,12 @@ fn blamed(why: usize, us: u64) {
 }
 
 /// For the frame-rate line: the five that waited longest.
-#[cfg(feature = "diagnostics")]
 fn log_blame(frames: f64) {
     let all = BLAME.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default();
+    #[cfg(feature = "diagnostics")]
     let wide = WIDE_WRITES.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default();
+    #[cfg(not(feature = "diagnostics"))]
+    let wide: std::collections::HashMap<(usize, usize, usize), (u64, String)> = Default::default();
     let mut all: Vec<_> = all.into_iter().collect();
     all.sort_unstable_by_key(|(_, (_, us, _))| std::cmp::Reverse(*us));
     for ((kind, why, len, from, size), (n, us, at)) in all.into_iter().take(5) {
@@ -3665,7 +3664,6 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
                     if let Some(_read) = copy_blocked(written, dst, src, len) {
                         if count {
                             LATE_STATS[15].fetch_add(1, Ordering::Relaxed);
-                            #[cfg(feature = "diagnostics")]
                             if _read {
                                 blame("a buffer copy's source", written, src, len);
                             } else {
@@ -3679,7 +3677,6 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
                     if read_blocked(written, src, len) {
                         if count {
                             LATE_STATS[16].fetch_add(1, Ordering::Relaxed);
-                            #[cfg(feature = "diagnostics")]
                             blame("a fill of upload memory", written, src, len);
                         }
                         return Some(WHY_READ);
@@ -3690,7 +3687,6 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
                     if touches(written, at, at + len) {
                         if count {
                             LATE_STATS[17].fetch_add(1, Ordering::Relaxed);
-                            #[cfg(feature = "diagnostics")]
                             blame("a texture", written, at, len);
                         }
                         return Some(WHY_READ);
@@ -3700,7 +3696,6 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
                     if touches(written, at, at.saturating_add(len)) {
                         if count {
                             LATE_STATS[17].fetch_add(1, Ordering::Relaxed);
-                            #[cfg(feature = "diagnostics")]
                             blame("a movie plane", written, at, len);
                         }
                         return Some(WHY_READ);
@@ -3713,7 +3708,6 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
                     place::Waits::Yes => {
                         if count {
                             LATE_STATS[15].fetch_add(1, Ordering::Relaxed);
-                            #[cfg(feature = "diagnostics")]
                             blame("a buffer copy at its place", written, p.src, p.len);
                         }
                         return Some(WHY_READ);
@@ -3724,7 +3718,6 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
         }
     }
     if placed && place::read_by(runs, written) {
-        #[cfg(feature = "diagnostics")]
         if count {
             blame("what a copy at its place writes", &[], 0, 0);
         }
@@ -4090,7 +4083,6 @@ fn relay_wait(why: usize, done: impl Fn(&Line) -> bool) {
     LATE_STATS[12].fetch_add(us, Ordering::Relaxed);
     LATE_WAITED[why.min(10)].fetch_add(us, Ordering::Relaxed);
     SUBMISSION_US[1].fetch_add(us, Ordering::Relaxed);
-    #[cfg(feature = "diagnostics")]
     blamed(why, us);
 }
 
@@ -4387,7 +4379,6 @@ fn late_line(frames: f64) {
     crate::watch::port_guard_line(frames);
     crate::port_journal::line(frames);
     crate::picked::log(frames);
-    #[cfg(feature = "diagnostics")]
     log_blame(frames);
     if late_exact() {
         let [pages, runs, bytes] = crate::shadow::merged_stats().map(|n| n as f64 / frames);
@@ -6263,7 +6254,6 @@ impl Host {
     ) {
         if relay_exact() && card_steps::stage() > 0 {
             for _ in 0..3 {
-                #[cfg(feature = "diagnostics")]
                 blame_stale(&stale);
                 relay_wait(WHY_STALE, |_| stale.iter().all(|(shadow, from, to)| !shadow.writes_pending_in(*from, *to)));
                 crate::watch::ask_once(ranges);
@@ -6273,7 +6263,6 @@ impl Host {
                 }
             }
         }
-        #[cfg(feature = "diagnostics")]
         blame_stale(&stale);
         self.settle(submitted, WHY_STALE);
         crate::watch::ask_once(ranges);
