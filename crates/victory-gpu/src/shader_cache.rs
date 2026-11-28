@@ -115,6 +115,9 @@ fn build() -> [u8; 32] {
             "VICTORY_WAVE_OWN_BITS",
             "VICTORY_WAVE_LOCAL",
             "VICTORY_LDS_FLAGS",
+            // (`VICTORY_WAVE_PAIRED_FOR` is not here: only the programs it names take another
+            // key, `paired_key`, so naming one does not translate every shader again)
+            "VICTORY_WAVE_PAIRED",
             "VICTORY_F16_NEAREST",
             "VICTORY_HELPER_OWN",
             "VICTORY_FIRSTLANE_OWN",
@@ -163,9 +166,12 @@ pub(crate) fn translation() -> [u8; 32] {
 pub fn precompile(container: &[u8]) -> Result<bool, String> {
     let _ = crate::host::host();
     let misses = MISSES.load(Ordering::Relaxed);
-    let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());
+    let paired = paired_first(container);
+    let translate = |c: &[u8]| {
+        victory_shader::emit::with_paired_first(paired, || victory_shader::emit::translate(c)).map_err(|e| e.to_string())
+    };
     match CACHE.get() {
-        Some(cache) => cached(cache, &build(), container, translate, true)?,
+        Some(cache) => cached(cache, &key_for(paired), container, translate, true)?,
         None => translate(container)?,
     };
     // (Counts other threads' misses too: the caller only adds them up.)
@@ -175,11 +181,35 @@ pub fn precompile(container: &[u8]) -> Result<bool, String> {
 /// The translation of a console shader container, from the cache when
 /// there is one.
 pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
-    let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());
+    let paired = paired_first(container);
+    let translate = |c: &[u8]| {
+        victory_shader::emit::with_paired_first(paired, || victory_shader::emit::translate(c)).map_err(|e| e.to_string())
+    };
     match CACHE.get() {
-        Some(cache) => cached(cache, &build(), container, translate, refresh_in_runs()),
+        Some(cache) => cached(cache, &key_for(paired), container, translate, refresh_in_runs()),
         None => translate(container),
     }
+}
+
+/// Whether `container` is one of the programs named in `VICTORY_WAVE_PAIRED_FOR` (the
+/// container's hash as the log names shaders, or its beginning; commas between): those try the
+/// paired form before any other (`victory_shader::emit::with_paired_first`). Containers are
+/// hashed only when the switch names something. (After edsuuu/VI-BR-PORT 13457bb7.)
+fn paired_first(container: &[u8]) -> bool {
+    victory_shader::emit::paired_names_any() && victory_shader::emit::paired_named(&blake3::hash(container).to_hex())
+}
+
+/// The cache key's build for a program: [`build`], and for a program named in
+/// `VICTORY_WAVE_PAIRED_FOR` ([`paired_first`]) that build with the paired form marked, so the
+/// named programs alone are translated again when the list changes.
+fn key_for(paired: bool) -> [u8; 32] {
+    if !paired {
+        return build();
+    }
+    let mut hash = blake3::Hasher::new();
+    hash.update(&build());
+    hash.update(b"VICTORY_WAVE_PAIRED_FOR: the paired form first");
+    *hash.finalize().as_bytes()
 }
 
 /// The cache entry's converter: the build and the container in, the

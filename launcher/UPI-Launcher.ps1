@@ -96,6 +96,13 @@ $settings = [ordered]@{
     # card 130-160 ms a frame). As edsuuu/VI-BR-PORT and VIctory-NVIDIA run.
     VICTORY_OUTPUT              = '1920x1080'
     VICTORY_DISPLAY_MODE        = '1920x1080'
+    # the water's tile list (CS_TransmissionVolumetrics_GenerateTiles) in
+    # the paired form of edsuuu/VI-BR-PORT: a console wave of 64 in one host
+    # wave of 32, two console lanes a host lane. Its other forms left whole
+    # tiles of open water dark around boats and along shores (screenshot of
+    # 2026-11-28 14:00); in theirs every tile was lit. Only this program's
+    # cache entry changes.
+    VICTORY_WAVE_PAIRED_FOR     = '1aa247ed3653b616'
     # the frame statistics line (fps, ms/frame) and the memory lines in the
     # log (VICTORY_BLOBS_LOG=1 adds the shaders that do not translate and
     # what the pipeline methods 0x1c8 and 0x218 are given, as base64)
@@ -190,6 +197,11 @@ if ($Turbo -and !$Safe) {
     # card, not copied back (crossducking/RAZDA4A-XEN: copy-back 27 -> 0.5 MB
     # a frame on a 6-core PC with 16 GB; here 28-37 MB and 33-49 ms a frame)
     $settings['VICTORY_WC_NO_BACK'] = '1'
+    # frames shown as soon as presented, not at the screen's next refresh
+    # (DXGI tearing, trustno1-coder/VIctory-NVIDIA: about 2 fps more there);
+    # a present the driver refuses that way falls back for the rest of the
+    # run. Without G-SYNC or FreeSync a frame may tear.
+    $settings['VICTORY_TEARING'] = '1'
     # (VICTORY_LAND_THREADS=6 was tried in run 2026-11-26 23:30: the landings
     # took as long as with the default 3, waiting on title memory that pages.)
     # (Neptune by Dolberth's smart copy-back, VICTORY_SMART_COPY_BACK=1, is

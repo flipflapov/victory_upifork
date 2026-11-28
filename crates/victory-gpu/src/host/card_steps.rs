@@ -681,9 +681,7 @@ impl Host {
             Ok(taken) => taken,
             Err(why) => {
                 DONE[3].fetch_add(1, Ordering::Relaxed);
-                #[cfg(feature = "diagnostics")]
                 refused(why);
-                let _ = why;
                 None
             }
         }
