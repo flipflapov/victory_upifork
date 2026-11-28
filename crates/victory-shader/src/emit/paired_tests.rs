@@ -337,14 +337,14 @@ fn first_lane_kept(threads: u32) -> NativeProgram {
     )
 }
 
-/// The switch picks the form, and only for a program that has no exact form without it: the
-/// wave OR in a branch of one console wave ([`program`]) keeps its translation (an exact form
-/// comes first); [`first_lane_kept`] in a group of two console waves, approximate before (each
-/// host wave on its own, every mask and lane read of its own), takes the paired form, and
-/// gives the console's first lane on the card. So does [`leave_one_by_one`] with one
-/// console wave (the loop's branch taken by the wave), round by round.
+/// The switch picks the form: a program named ([`super::super::with_paired_first`], as
+/// `VICTORY_WAVE_PAIRED_FOR` does) takes the paired form before any other, the wave OR in a
+/// branch of one console wave ([`program`]) too, which has an exact form without it;
+/// [`first_lane_kept`] in a group of two console waves, approximate without it (each host wave
+/// on its own, every mask and lane read of its own), gives the console's first lane on the card
+/// with it. So does [`leave_one_by_one`] with one console wave, round by round.
 #[test]
-fn the_paired_form_is_only_taken_when_asked_for_and_nothing_exact_came_first() {
+fn the_paired_form_is_taken_when_asked_for() {
     let emit = |native: &NativeProgram, paired: bool| {
         let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
         let st = structure::structure(&p).expect("structure");
@@ -361,8 +361,9 @@ fn the_paired_form_is_only_taken_when_asked_for_and_nothing_exact_came_first() {
         r.expect("emit").dxil
     };
     let exact = program(0xBF88_0000);
-    assert_eq!(emit(&exact, true), emit(&exact, false));
-    assert_ne!(emit(&exact, true), paired(&exact).dxil);
+    // (named: the paired form even where an exact one came first)
+    assert_ne!(emit(&exact, false), paired(&exact).dxil);
+    assert_eq!(emit(&exact, true), paired(&exact).dxil);
     let approximate = first_lane_kept(128);
     let before = emit(&approximate, false);
     assert_ne!(before, emit(&approximate, true));
