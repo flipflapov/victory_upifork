@@ -29,7 +29,11 @@ pub mod structure;
 /// 2: a program's constant table starts after its instructions (upstream
 /// VIctory #2143), denormal operands of `v_mul_legacy_f32`, dword 0 of root
 /// constants traced as a value.
-pub const TRANSLATOR_VERSION: u32 = 2;
+/// 3: a mask's lane bit by console lane in halves mode (lanes 32-63 of a
+/// console wave64 program in two host waves of 32 took the low dword's
+/// bits), `v_div_fixup` resolves zero and infinity operands before a NaN
+/// quotient (both from trustno1-coder/VIctory-NVIDIA).
+pub const TRANSLATOR_VERSION: u32 = 3;
 
 pub use dxbc::{Container, FourCC, Part};
 pub use dxil::{DxilProgram, ShaderKind, XboxExtras};
